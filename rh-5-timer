@@ -1,0 +1,196 @@
+RHEL-5
+(一)
+start_secondary()
+     
+     --> tsc_sync_wait();
+           
+	    --> unsynchronized_tsc()
+	       
+	             --> dmi_check_system()
+		         num_chassis > 1
+			 return 1
+
+	    --> sync_tsc()
+	        system log : CPU 1: Syncing TSC to CPU 0.
+
+(二)
+time_init()
+
+     --> time_init_gtod()
+
+            --> unsynchronized_tsc()
+	       
+	        notsc = 1;
+
+
+
+
+Using local APIC timer interrupts.
+Detected 16.658 MHz APIC timer.
+
+
+void __init time_init(void)
+{      
+        unsigned int hypervisor_khz;
+
+        /*
+         * 'tick_nsec' is set to TICK_NSEC at compile time. The value of
+         * TICK_NSEC depends on HZ. The kernel parameter 'tick_divider'
+         * allows to change REAL_HZ at boottime, so 'tick_nsec' needs to
+         * be adjusted to REAL_HZ. Otherwise time will drift backwards.
+         *
+         * For example, with HZ=1000 the initial value of 'tick_nsec'
+         * is 999848 and with HZ=100 the initial value of 'tick_nsec'
+         * is 10000000. Therefore, with 'tick_divider=10' the value of
+         * 'tick_nsec' needs to be adjusted to 10000000 / 10 = 1000000.
+         * Otherwise time drifts backwards by 1000000 - 999848 = 152 ns
+         * per logical tick. This accumulates to 152 * 1000 * 3600 =
+         * 547200000 ns = 0.5472 seconds per hour.
+         */
+        if (tick_divider > 1 && pmtimer_fine_grained) {
+                unsigned long acthz = SH_DIV(CLOCK_TICK_RATE, LATCH, 8);
+                tick_nsec = SH_DIV(NSEC_PER_SEC, acthz, 8) / tick_divider;
+        }
+       
+        if (nohpet)
+                vxtime.hpet_address = 0;
+
+        xtime.tv_sec = get_wallclock();
+        xtime.tv_nsec = 0;
+
+        set_normalized_timespec(&wall_to_monotonic,                                                                                                                                                                             
+                                -xtime.tv_sec, -xtime.tv_nsec);                                                                                                                                                                 
+
+        if (!hpet_init())
+                vxtime_hz = (FSEC_PER_SEC + hpet_period / 2) / hpet_period;
+        else
+                vxtime.hpet_address = 0;
+
+        if (use_kvm_time) {
+                timename = "KVM";
+                /* no need to get frequency here, since we'll skip the calibrate loop anyway */
+                timekeeping_use_tsc = 1;
+                vxtime.last_kvm = kvm_clock_read();
+        } else if (avoid_smi) {
+                printk(KERN_INFO "Enabling SMI avoidance in CPU calibration\n");
+                if (hpet_use_timer) {
+                        tick_nsec = TICK_NSEC_HPET;
+                        timename = "HPET";
+                } else if (pmtmr_ioport && !vxtime.hpet_address) {
+                        vxtime_hz = PM_TIMER_FREQUENCY;
+                        timename = "PM";
+                        pit_init();
+                } else {
+                        pit_init();
+                        timename = "PIT";
+                }
+                tsc_khz = native_calibrate_tsc();
+        } else if (hpet_use_timer) {
+                /* set tick_nsec to use the proper rate for HPET */
+                tick_nsec = TICK_NSEC_HPET;
+                tsc_khz = hpet_calibrate_tsc();
+                timename = "HPET";
+#ifdef CONFIG_X86_PM_TIMER
+        } else if (pmtmr_ioport && !vxtime.hpet_address) {
+                vxtime_hz = PM_TIMER_FREQUENCY;
+                timename = "PM";
+                pit_init();
+                tsc_khz = pit_calibrate_tsc();
+#endif
+        } else {
+                pit_init();
+                tsc_khz = pit_calibrate_tsc();
+                timename = "PIT";
+        }
+
+        cpu_khz = tsc_khz;
+        if (cpu_has(&boot_cpu_data, X86_FEATURE_CONSTANT_TSC) &&
+                boot_cpu_data.x86_vendor == X86_VENDOR_AMD &&
+                boot_cpu_data.x86 == 16 && !avoid_smi)
+                cpu_khz = tsc_calibrate_cpu_khz();
+
+        /* Should we get tsc_khz from the hypervisor? */
+        hypervisor_khz = get_hypervisor_tsc_freq();
+        if (hypervisor_khz) {
+                tsc_khz = hypervisor_khz;
+                cpu_khz = tsc_khz;
+        }
+
+        lpj_fine = ((unsigned long)tsc_khz * 1000)/HZ;
+
+        /* Keep time based on the TSC rather than by counting interrupts. */
+        init_tsc_timer();
+
+        vxtime.mode = VXTIME_TSC;
+        vxtime.quot = (NSEC_PER_SEC << NS_SCALE) / vxtime_hz;
+        vxtime.tsc_quot = (NSEC_PER_MSEC << NS_SCALE) / cpu_khz;
+        vxtime.last_tsc = get_cycles_sync();
+        setup_irq(0, &irq0);
+
+        set_cyc2ns_scale(tsc_khz);
+
+        hotcpu_notifier(time_cpu_notifier, 0);
+        time_cpu_notifier(NULL, CPU_ONLINE, (void *)(long)smp_processor_id());
+
+#ifndef CONFIG_SMP
+        time_init_gtod();
+#endif
+}
+
+/*
+ * Decide what mode gettimeofday should use.
+ */
+void time_init_gtod(void)
+{       
+        char *timetype;
+
+        if (unsynchronized_tsc())
+                notsc = 1;
+
+        if (cpu_has(&boot_cpu_data, X86_FEATURE_RDTSCP))
+                vgetcpu_mode = VGETCPU_RDTSCP;
+        else    
+                vgetcpu_mode = VGETCPU_LSL;
+
+        if (use_kvm_time) {
+                timetype = "KVM";
+                vxtime.last_kvm = kvm_clock_read();
+                vxtime.mode = VXTIME_KVM;
+                do_gettimeoffset = do_gettimeoffset_kvm;
+        } else if (timekeeping_use_tsc > 0) {
+                timetype = "TSC Timekeeping";
+                vxtime.mode = VXTIME_TSC;
+        } else if (vxtime.hpet_address && notsc) {
+                timetype = hpet_use_timer ? "HPET" : "PIT/HPET";
+                if (hpet_use_timer)
+                        vxtime.last = hpet_readl(HPET_T0_CMP) - hpet_tick_real;
+                else    
+                        vxtime.last = hpet_readl(HPET_COUNTER);
+                vxtime.mode = VXTIME_HPET;
+                do_gettimeoffset = do_gettimeoffset_hpet;
+#ifdef CONFIG_X86_PM_TIMER
+        /* Using PM for gettimeofday is quite slow, but we have no other                                                                                                                                                        
+           choice because the TSC is too unreliable on some systems. */                                                                                                                                                         
+        } else if (pmtmr_ioport && !vxtime.hpet_address && notsc) {
+                timetype = "PM";
+                do_gettimeoffset = do_gettimeoffset_pm;
+                vxtime.mode = VXTIME_PMTMR;
+                sysctl_vsyscall = 0;
+                printk(KERN_INFO "Disabling vsyscall due to use of PM timer\n");
+#endif
+        } else {
+                timetype = hpet_use_timer ? "HPET/TSC" : "PIT/TSC";
+                vxtime.mode = VXTIME_TSC;
+        }
+
+        printk(KERN_INFO "time.c: Using %ld.%06ld MHz WALL %s GTOD %s timer.\n",
+                vxtime_hz / 1000000, vxtime_hz % 1000000, timename, timetype);
+        printk(KERN_INFO "time.c: Detected %d.%03d MHz processor.\n",
+                cpu_khz / 1000, cpu_khz % 1000);
+        vxtime.quot = (NSEC_PER_SEC << NS_SCALE) / vxtime_hz;
+        vxtime.tsc_quot = (NSEC_PER_MSEC << NS_SCALE) / tsc_khz;
+        vxtime.last_tsc = get_cycles_sync();
+
+        set_cyc2ns_scale(tsc_khz);
+}
+
