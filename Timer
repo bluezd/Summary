@@ -441,3 +441,51 @@ static struct clocksource clocksource_tsc = {
         .vread                  = vread_tsc,
 #endif
 };
+
+
+# cat /proc/timer_list | more
+Tick Device: mode:     1                      --> one-shot 单次 
+Broadcast device
+Clock Event Device: hpet
+ max_delta_ns:   149983013276
+ min_delta_ns:   13409
+ mult:           61496111
+ shift:          32
+ mode:           3
+ next_event:     21524167000000 nsecs
+ set_next_event: hpet_legacy_next_event
+ set_mode:       hpet_legacy_set_mode
+ event_handler:  tick_handle_oneshot_broadcast
+ retries:        1459862
+tick_broadcast_mask: 00000001
+tick_broadcast_oneshot_mask: 00000002
+
+
+Tick Device: mode:     1
+Per CPU device: 0
+Clock Event Device: lapic
+ max_delta_ns:   128824925406
+ min_delta_ns:   1000
+ mult:           71596176
+ shift:          32
+ mode:           3
+ next_event:     21524167000000 nsecs
+ set_next_event: lapic_next_event
+ set_mode:       lapic_timer_setup
+ event_handler:  hrtimer_interrupt
+ retries:        891537
+
+Tick Device: mode:     1
+Per CPU device: 1
+Clock Event Device: lapic
+ max_delta_ns:   128824925406
+ min_delta_ns:   1000
+ mult:           71596176
+ shift:          32
+ mode:           1
+ next_event:     21524167000000 nsecs
+ set_next_event: lapic_next_event
+ set_mode:       lapic_timer_setup
+ event_handler:  hrtimer_interrupt
+ retries:        539190
+
