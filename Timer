@@ -1,3 +1,216 @@
+start_kernel()
+   --> tick_init()
+
+/**
+ * tick_init - initialize the tick control
+ *
+ * Register the notifier with the clockevents framework
+ */
+void __init tick_init(void)
+{
+        clockevents_register_notifier(&tick_notifier);
+}
+
+
+static struct notifier_block tick_notifier = {
+        .notifier_call = tick_notify,
+};
+
+/**
+ * clockevents_register_notifier - register a clock events change listener
+ */
+int clockevents_register_notifier(struct notifier_block *nb)
+{
+        nb = &tick_notifier
+        unsigned long flags;
+        int ret;
+
+        spin_lock_irqsave(&clockevents_lock, flags);
+        ret = raw_notifier_chain_register(&clockevents_chain, nb);
+        spin_unlock_irqrestore(&clockevents_lock, flags);
+        
+        return ret;
+}
+
+/* Notification for clock events */
+static RAW_NOTIFIER_HEAD(clockevents_chain);
+
+#define RAW_NOTIFIER_HEAD(name)                                 \
+        struct raw_notifier_head name =                         \
+                RAW_NOTIFIER_INIT(name)
+
+#define RAW_NOTIFIER_INIT(name) {                               \
+                .head = NULL }
+
+struct raw_notifier_head {
+        struct notifier_block *head;
+};
+
+struct notifier_block {
+        int (*notifier_call)(struct notifier_block *, unsigned long, void *);
+        struct notifier_block *next;
+        int priority;
+};
+
+
+int raw_notifier_chain_register(struct raw_notifier_head *nh,
+                struct notifier_block *n)
+{
+        return notifier_chain_register(&nh->head, n);
+}
+
+/*
+ *      Notifier chain core routines.  The exported routines below
+ *      are layered on top of these, with appropriate locking added.
+ */
+
+static int notifier_chain_register(struct notifier_block **nl,
+                struct notifier_block *n)
+{               
+        此时 *nl = NULL
+
+        while ((*nl) != NULL) {
+                if (n->priority > (*nl)->priority)
+                        break;
+                nl = &((*nl)->next);
+        }
+        n->next = *nl;
+        n->next = NULL;
+
+        rcu_assign_pointer(*nl, n);
+        *nl = n;
+        clockevents_chain->head = &tick_notifier;
+
+        return 0;
+}
+
+/**
+ * rcu_assign_pointer - assign (publicize) a pointer to a newly
+ * initialized structure that will be dereferenced by RCU read-side
+ * critical sections.  Returns the value assigned.
+ *
+ * Inserts memory barriers on architectures that require them
+ * (pretty much all of them other than x86), and also prevents
+ * the compiler from reordering the code that initializes the
+ * structure after the pointer assignment.  More importantly, this
+ * call documents which pointers will be dereferenced by RCU read-side
+ * code.
+ */             
+
+#define rcu_assign_pointer(p, v) \
+        ({ \    
+                if (!__builtin_constant_p(v) || \
+                    ((v) != NULL)) \
+                        smp_wmb(); \
+                (p) = (v); \
+        })
+
+当时钟事件设备信息发生变化时调用tick_notifier
+
+start_kernel:
+     init_timers();
+
+void __init init_timers(void)
+{       
+        int err = timer_cpu_notify(&timers_nb, (unsigned long)CPU_UP_PREPARE,
+                                (void *)(long)smp_processor_id());
+        
+        init_timer_stats();
+        
+        BUG_ON(err == NOTIFY_BAD);
+        register_cpu_notifier(&timers_nb);
+        open_softirq(TIMER_SOFTIRQ, run_timer_softirq);
+}
+
+static struct notifier_block __cpuinitdata timers_nb = {
+        .notifier_call  = timer_cpu_notify,
+};
+
+初始化指定CPU上的软时钟相关的数据结构
+static int __cpuinit timer_cpu_notify(struct notifier_block *self,
+                                unsigned long action, void *hcpu)
+{       
+        long cpu = (long)hcpu;
+        switch(action) {
+        case CPU_UP_PREPARE:
+        case CPU_UP_PREPARE_FROZEN:
+                if (init_timers_cpu(cpu) < 0)
+                        return NOTIFY_BAD;
+                break;
+#ifdef CONFIG_HOTPLUG_CPU
+        case CPU_DEAD:
+        case CPU_DEAD_FROZEN:
+                migrate_timers(cpu);
+                break;
+#endif
+        default:
+                break;
+        }
+        return NOTIFY_OK;
+}
+
+static inline uint32_t raid6_jiffies(void)
+{               
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        return tv.tv_sec*1000 + tv.tv_usec/1000;
+}    
+
+static __always_inline int gettimeofday(struct timeval *tv, struct timezone *tz)
+{
+        int ret;
+        asm volatile("syscall"
+                : "=a" (ret)
+                : "0" (__NR_gettimeofday),"D" (tv),"S" (tz)
+                : __syscall_clobber );
+        return ret;
+}       
+
+start_kernel:
+    hrtimers_init();
+
+start_kernel:
+    timekeeping_init();
+
+
+/*
+ * timekeeping_init - Initializes the clocksource and common timekeeping values
+ */
+void __init timekeeping_init(void)
+{
+        struct clocksource *clock;
+        unsigned long flags;
+        struct timespec now, boot;
+
+        read_persistent_clock(&now);
+        read_boot_clock(&boot);
+
+        write_seqlock_irqsave(&xtime_lock, flags);
+
+        ntp_init();
+
+        clock = clocksource_default_clock();
+        if (clock->enable)
+                clock->enable(clock);
+        timekeeper_setup_internals(clock);
+
+        xtime.tv_sec = now.tv_sec;
+        xtime.tv_nsec = now.tv_nsec;
+        raw_time.tv_sec = 0;
+        raw_time.tv_nsec = 0;
+        if (boot.tv_sec == 0 && boot.tv_nsec == 0) {
+                boot.tv_sec = xtime.tv_sec;
+                boot.tv_nsec = xtime.tv_nsec;
+        }
+        set_normalized_timespec(&wall_to_monotonic,
+                                -boot.tv_sec, -boot.tv_nsec);
+        update_xtime_cache(0);
+        total_sleep_time.tv_sec = 0;
+        total_sleep_time.tv_nsec = 0;
+        write_sequnlock_irqrestore(&xtime_lock, flags);
+}
+
+
 /*
  * Initialize TSC and delay the periodic timer init to
  * late x86_late_time_init() so ioremap works.
@@ -302,6 +515,50 @@ void timekeeping_notify(struct clocksource *clock)
 }
 
 
+static void hpet_legacy_clockevent_register(void)
+{
+        /* Start HPET legacy interrupts */
+        hpet_enable_legacy_int();
+
+        /*
+         * The mult factor is defined as (include/linux/clockchips.h)
+         *  mult/2^shift = cyc/ns (in contrast to ns/cyc in clocksource.h)
+         * hpet_period is in units of femtoseconds (per cycle), so
+         *  mult/2^shift = cyc/ns = 10^6/hpet_period
+         *  mult = (10^6 * 2^shift)/hpet_period
+         *  mult = (FSEC_PER_NSEC << hpet_clockevent.shift)/hpet_period
+         */
+        hpet_clockevent.mult = div_sc((unsigned long) FSEC_PER_NSEC,
+                                      hpet_period, hpet_clockevent.shift);
+        /* Calculate the min / max delta */
+        hpet_clockevent.max_delta_ns = clockevent_delta2ns(0x7FFFFFFF,
+                                                           &hpet_clockevent);
+        /* 5 usec minimum reprogramming delta. */
+        hpet_clockevent.min_delta_ns = 5000;
+
+        /*
+         * Start hpet with the boot cpu mask and make it
+         * global after the IO_APIC has been initialized.
+         */
+        hpet_clockevent.cpumask = cpumask_of(smp_processor_id());
+        clockevents_register_device(&hpet_clockevent);
+        global_clock_event = &hpet_clockevent;
+        printk(KERN_DEBUG "hpet clockevent registered\n");
+}
+
+/*      
+ * The hpet clock event device
+ */
+static struct clock_event_device hpet_clockevent = {
+        .name           = "hpet",
+        .features       = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,
+        .set_mode       = hpet_legacy_set_mode,
+        .set_next_event = hpet_legacy_next_event,
+        .shift          = 32,
+        .irq            = 0, 
+        .rating         = 50,
+};
+
 /*              
  * Initialize the conversion factor and the min/max deltas of the clock event
  * structure and register the clock event source with the framework.
@@ -489,3 +746,320 @@ Clock Event Device: lapic
  event_handler:  hrtimer_interrupt
  retries:        539190
 
+/**
+ * clockevents_register_device - register a clock event device
+ * @dev:        device to register
+ */
+void clockevents_register_device(struct clock_event_device *dev)
+{
+        unsigned long flags;
+
+        BUG_ON(dev->mode != CLOCK_EVT_MODE_UNUSED);
+        BUG_ON(!dev->cpumask);
+
+        spin_lock_irqsave(&clockevents_lock, flags);
+
+        list_add(&dev->list, &clockevent_devices);
+        clockevents_do_notify(CLOCK_EVT_NOTIFY_ADD, dev);
+        clockevents_notify_released();
+
+        spin_unlock_irqrestore(&clockevents_lock, flags);
+}
+
+/* Clock event notification values */
+enum clock_event_nofitiers {
+        CLOCK_EVT_NOTIFY_ADD,
+        CLOCK_EVT_NOTIFY_BROADCAST_ON,
+        CLOCK_EVT_NOTIFY_BROADCAST_OFF,
+        CLOCK_EVT_NOTIFY_BROADCAST_FORCE,
+        CLOCK_EVT_NOTIFY_BROADCAST_ENTER,
+        CLOCK_EVT_NOTIFY_BROADCAST_EXIT,
+        CLOCK_EVT_NOTIFY_SUSPEND,
+        CLOCK_EVT_NOTIFY_RESUME,
+        CLOCK_EVT_NOTIFY_CPU_DYING,
+        CLOCK_EVT_NOTIFY_CPU_DEAD,
+};
+
+/*
+ * Notify about a clock event change. Called with clockevents_lock
+ * held.
+ */
+static void clockevents_do_notify(unsigned long reason, void *dev)
+{
+        raw_notifier_call_chain(&clockevents_chain, reason, dev);
+}
+
+
+
+/**     
+ *      __raw_notifier_call_chain - Call functions in a raw notifier chain
+ *      @nh: Pointer to head of the raw notifier chain
+ *      @val: Value passed unmodified to notifier function
+ *      @v: Pointer passed unmodified to notifier function
+ *      @nr_to_call: See comment for notifier_call_chain.
+ *      @nr_calls: See comment for notifier_call_chain
+ *
+ *      Calls each function in a notifier chain in turn.  The functions
+ *      run in an undefined context.
+ *      All locking must be provided by the caller.
+ *
+ *      If the return value of the notifier can be and'ed
+ *      with %NOTIFY_STOP_MASK then raw_notifier_call_chain()
+ *      will return immediately, with the return value of
+ *      the notifier function which halted execution.
+ *      Otherwise the return value is the return value
+ *      of the last notifier function called.
+ */     
+int __raw_notifier_call_chain(struct raw_notifier_head *nh,
+                              unsigned long val, void *v,
+                              int nr_to_call, int *nr_calls)
+{
+        return notifier_call_chain(&nh->head, val, v, nr_to_call, nr_calls);
+}
+EXPORT_SYMBOL_GPL(__raw_notifier_call_chain);
+
+int raw_notifier_call_chain(struct raw_notifier_head *nh,
+                unsigned long val, void *v)
+{
+        return __raw_notifier_call_chain(nh, val, v, -1, NULL);
+}
+
+/**
+ * notifier_call_chain - Informs the registered notifiers about an event.
+ *      @nl:            Pointer to head of the blocking notifier chain
+ *      @val:           Value passed unmodified to notifier function
+ *      @v:             Pointer passed unmodified to notifier function
+ *      @nr_to_call:    Number of notifier functions to be called. Don't care
+ *                      value of this parameter is -1.
+ *      @nr_calls:      Records the number of notifications sent. Don't care
+ *                      value of this field is NULL.
+ *      @returns:       notifier_call_chain returns the value returned by the
+ *                      last notifier function called.
+ */
+static int __kprobes notifier_call_chain(struct notifier_block **nl,
+                                        unsigned long val, void *v,
+                                        int nr_to_call, int *nr_calls)
+{
+        int ret = NOTIFY_DONE;
+        struct notifier_block *nb, *next_nb;
+
+        nb = rcu_dereference(*nl);
+        nb 指向 notifier_block
+
+        while (nb && nr_to_call) {
+                nr_to_call = -1
+
+                next_nb = rcu_dereference(nb->next);
+
+#ifdef CONFIG_DEBUG_NOTIFIERS
+                if (unlikely(!func_ptr_is_kernel_text(nb->notifier_call))) {
+                        WARN(1, "Invalid notifier called!");
+                        nb = next_nb;
+                        continue;
+                }
+#endif
+                ret = nb->notifier_call(nb, val, v);
+                调用 tick_notify 函数 val = CLOCK_EVT_NOTIFY_ADD 
+
+                if (nr_calls)
+                        (*nr_calls)++;
+
+                if ((ret & NOTIFY_STOP_MASK) == NOTIFY_STOP_MASK)
+                        break;
+                nb = next_nb;
+                nr_to_call--;
+        }
+        return ret;
+}
+
+/*
+ * Notification about clock event devices
+ */
+static int tick_notify(struct notifier_block *nb, unsigned long reason,
+                               void *dev)
+{
+        switch (reason) {
+
+        case CLOCK_EVT_NOTIFY_ADD:
+                return tick_check_new_device(dev);
+
+        case CLOCK_EVT_NOTIFY_BROADCAST_ON:
+        case CLOCK_EVT_NOTIFY_BROADCAST_OFF:
+        case CLOCK_EVT_NOTIFY_BROADCAST_FORCE:
+                tick_broadcast_on_off(reason, dev);
+                break;
+
+        case CLOCK_EVT_NOTIFY_BROADCAST_ENTER:
+        case CLOCK_EVT_NOTIFY_BROADCAST_EXIT:
+                tick_broadcast_oneshot_control(reason);
+                break;
+
+        case CLOCK_EVT_NOTIFY_CPU_DYING:
+                tick_handover_do_timer(dev);
+                break;
+
+        case CLOCK_EVT_NOTIFY_CPU_DEAD:
+                tick_shutdown_broadcast_oneshot(dev);
+                tick_shutdown_broadcast(dev);
+                tick_shutdown(dev);
+                break;
+
+        case CLOCK_EVT_NOTIFY_SUSPEND:
+                tick_suspend();
+                tick_suspend_broadcast();
+                break;
+
+        case CLOCK_EVT_NOTIFY_RESUME:
+                tick_resume();
+                break;
+
+        default:
+                break;
+        }
+
+        return NOTIFY_OK;
+}
+
+/*      
+ * Check, if the new registered device should be used.
+ */             
+static int tick_check_new_device(struct clock_event_device *newdev)
+{       
+        newdev = &hpet_clockevent;
+
+        struct clock_event_device *curdev;
+        struct tick_device *td;
+        int cpu, ret = NOTIFY_OK;
+        unsigned long flags;
+        
+        spin_lock_irqsave(&tick_device_lock, flags);
+                
+        cpu = smp_processor_id();
+        if (!cpumask_test_cpu(cpu, newdev->cpumask))
+                goto out_bc;
+                
+        td = &per_cpu(tick_cpu_device, cpu);
+        curdev = td->evtdev;
+
+        /* cpu local device ? */
+        if (!cpumask_equal(newdev->cpumask, cpumask_of(cpu))) {
+
+                /*
+                 * If the cpu affinity of the device interrupt can not
+                 * be set, ignore it.
+                 */
+                if (!irq_can_set_affinity(newdev->irq))
+                        goto out_bc;
+
+                /*
+                 * If we have a cpu local device already, do not replace it
+                 * by a non cpu local device
+                 */
+                if (curdev && cpumask_equal(curdev->cpumask, cpumask_of(cpu)))
+                        goto out_bc;
+        }
+
+        /*
+         * If we have an active device, then check the rating and the oneshot
+         * feature.
+         */
+        if (curdev) {
+                /*
+                 * Prefer one shot capable devices !
+                 */
+                if ((curdev->features & CLOCK_EVT_FEAT_ONESHOT) &&
+                    !(newdev->features & CLOCK_EVT_FEAT_ONESHOT))
+                        goto out_bc;
+                /*
+                 * Check the rating
+                 */
+                if (curdev->rating >= newdev->rating)
+                        goto out_bc;
+        }
+
+        /*
+         * Replace the eventually existing device by the new
+         * device. If the current device is the broadcast device, do
+         * not give it back to the clockevents layer !
+         */
+        if (tick_is_broadcast_device(curdev)) {
+                clockevents_shutdown(curdev);
+                curdev = NULL;
+        }
+        clockevents_exchange_device(curdev, newdev);
+        tick_setup_device(td, newdev, cpu, cpumask_of(cpu));
+        if (newdev->features & CLOCK_EVT_FEAT_ONESHOT)
+                tick_oneshot_notify();
+
+        spin_unlock_irqrestore(&tick_device_lock, flags);
+        return NOTIFY_STOP;
+
+out_bc:
+        /*
+         * Can the new device be used as a broadcast device ?
+         */
+        if (tick_check_broadcast_device(newdev))
+                ret = NOTIFY_STOP;
+
+        spin_unlock_irqrestore(&tick_device_lock, flags);
+
+        return ret;
+}
+
+/*
+ * Setup the tick device
+ */
+static void tick_setup_device(struct tick_device *td,
+                              struct clock_event_device *newdev, int cpu,
+                              const struct cpumask *cpumask)
+{
+        ktime_t next_event;
+        void (*handler)(struct clock_event_device *) = NULL;
+
+        /*
+         * First device setup ?
+         */
+        if (!td->evtdev) {
+                /*
+                 * If no cpu took the do_timer update, assign it to
+                 * this cpu:
+                 */
+                if (tick_do_timer_cpu == TICK_DO_TIMER_BOOT) {
+                        tick_do_timer_cpu = cpu;
+                        tick_next_period = ktime_get();
+                        tick_period = ktime_set(0, NSEC_PER_SEC / HZ);
+                }
+
+                /*
+                 * Startup in periodic mode first.
+                 */
+                td->mode = TICKDEV_MODE_PERIODIC;
+        } else {
+                handler = td->evtdev->event_handler;
+                next_event = td->evtdev->next_event;
+                td->evtdev->event_handler = clockevents_handle_noop;
+        }
+
+        td->evtdev = newdev;
+
+        /*
+         * When the device is not per cpu, pin the interrupt to the
+         * current cpu:
+         */
+        if (!cpumask_equal(newdev->cpumask, cpumask))
+                irq_set_affinity(newdev->irq, cpumask);
+
+        /*
+         * When global broadcasting is active, check if the current
+         * device is registered as a placeholder for broadcast mode.
+         * This allows us to handle this x86 misfeature in a generic
+         * way.
+         */
+        if (tick_device_uses_broadcast(newdev, cpu))
+                return;
+
+        if (td->mode == TICKDEV_MODE_PERIODIC)
+                tick_setup_periodic(newdev, 0);
+        else
+                tick_setup_oneshot(newdev, handler, next_event);
+}
