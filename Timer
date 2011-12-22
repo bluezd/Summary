@@ -120,6 +120,7 @@ void __init init_timers(void)
         BUG_ON(err == NOTIFY_BAD);
         register_cpu_notifier(&timers_nb);
         open_softirq(TIMER_SOFTIRQ, run_timer_softirq);
+        软中断 下半步 高精度 timer.
 }
 
 static struct notifier_block __cpuinitdata timers_nb = {
@@ -166,12 +167,127 @@ static __always_inline int gettimeofday(struct timeval *tv, struct timezone *tz)
         return ret;
 }       
 
+/**             
+ * do_gettimeofday - Returns the time of day in a timeval
+ * @tv:         pointer to the timeval to be set
+ *
+ * NOTE: Users should be converted to using getnstimeofday()
+ */
+void do_gettimeofday(struct timeval *tv)
+{       
+        struct timespec now;
+                
+        getnstimeofday(&now);
+        tv->tv_sec = now.tv_sec;
+        tv->tv_usec = now.tv_nsec/1000;
+}       
+
+/*
+ * Simulate gettimeofday using do_gettimeofday which only allows a timeval
+ * and therefore only yields usec accuracy
+ */     
+void getnstimeofday(struct timespec *tv)
+{       
+        struct timeval x;
+
+        do_gettimeofday(&x);
+        tv->tv_sec = x.tv_sec;
+        tv->tv_nsec = x.tv_usec * NSEC_PER_USEC;
+}
+
+/**
+ * getnstimeofday - Returns the time of day in a timespec
+ * @ts:         pointer to the timespec to be set
+ *
+ * Returns the time of day in a timespec.
+ */
+void getnstimeofday(struct timespec *ts)
+{       
+        unsigned long seq;
+        s64 nsecs;
+
+        WARN_ON(timekeeping_suspended);
+
+        do {
+                seq = read_seqbegin(&xtime_lock);
+
+                *ts = xtime;
+                nsecs = timekeeping_get_ns();
+
+                /* If arch requires, add in gettimeoffset() */
+                nsecs += arch_gettimeoffset();
+
+        } while (read_seqretry(&xtime_lock, seq));
+
+        timespec_add_ns(ts, nsecs);
+}
+
+
+void __init init_timer_stats(void)
+{                                    
+        int cpu;
+        
+        for_each_possible_cpu(cpu)
+                spin_lock_init(&per_cpu(lookup_lock, cpu));
+}      
+
+/* Need to know about CPUs going up/down? */
+int __ref register_cpu_notifier(struct notifier_block *nb)
+{
+        nb=&timers_nb
+
+        int ret;
+        cpu_maps_update_begin();
+        ret = raw_notifier_chain_register(&cpu_chain, nb);
+        cpu_maps_update_done();
+        return ret;
+}
+
+static __cpuinitdata RAW_NOTIFIER_HEAD(cpu_chain);
+
+#define RAW_NOTIFIER_HEAD(name)                                 \
+        struct raw_notifier_head name =                         \
+                RAW_NOTIFIER_INIT(name)
+
+void cpu_maps_update_begin(void)
+{
+        mutex_lock(&cpu_add_remove_lock);
+}
+
+/**
+ *      raw_notifier_chain_register - Add notifier to a raw notifier chain
+ *      @nh: Pointer to head of the raw notifier chain
+ *      @n: New entry in notifier chain
+ *
+ *      Adds a notifier to a raw notifier chain.
+ *      All locking must be provided by the caller.
+ *
+ *      Currently always returns zero.
+ */
+int raw_notifier_chain_register(struct raw_notifier_head *nh,
+                struct notifier_block *n)
+{
+        return notifier_chain_register(&nh->head, n);
+}
+
+
+
 start_kernel:
     hrtimers_init();
 
+void __init hrtimers_init(void)
+{
+        hrtimer_cpu_notify(&hrtimers_nb, (unsigned long)CPU_UP_PREPARE,
+                          (void *)(long)smp_processor_id());
+        register_cpu_notifier(&hrtimers_nb);
+#ifdef CONFIG_HIGH_RES_TIMERS
+        open_softirq(HRTIMER_SOFTIRQ, run_hrtimer_softirq);
+#endif
+}
+
+
 start_kernel:
     timekeeping_init();
-
 
 /*
  * timekeeping_init - Initializes the clocksource and common timekeeping values
@@ -752,6 +868,8 @@ Clock Event Device: lapic
  */
 void clockevents_register_device(struct clock_event_device *dev)
 {
+        dev=&hpet_clockevent
+
         unsigned long flags;
 
         BUG_ON(dev->mode != CLOCK_EVT_MODE_UNUSED);
@@ -939,7 +1057,10 @@ static int tick_check_new_device(struct clock_event_device *newdev)
                 goto out_bc;
                 
         td = &per_cpu(tick_cpu_device, cpu);
+        tick_cpu_device 是一个各CPU链表，包含了系统中每个CPU对应的struct tick_device 实例.
+
         curdev = td->evtdev;
+        curdev = NULL;
 
         /* cpu local device ? */
         if (!cpumask_equal(newdev->cpumask, cpumask_of(cpu))) {
@@ -1006,6 +1127,50 @@ out_bc:
         return ret;
 }
 
+/**
+ * clockevents_exchange_device - release and request clock devices
+ * @old:        device to release (can be NULL)
+ * @new:        device to request (can be NULL)
+ *
+ * Called from the notifier chain. clockevents_lock is held already
+ */
+void clockevents_exchange_device(struct clock_event_device *old,
+                                 struct clock_event_device *new)
+{
+        old = NULL
+        new = &hpet_clockevent 
+
+        unsigned long flags;
+
+        local_irq_save(flags);
+        /*
+         * Caller releases a clock event device. We queue it into the
+         * released list and do a notify add later.
+         */
+        if (old) {
+                clockevents_set_mode(old, CLOCK_EVT_MODE_UNUSED);
+                list_del(&old->list);
+                list_add(&old->list, &clockevents_released);
+        }
+
+        if (new) {
+                BUG_ON(new->mode != CLOCK_EVT_MODE_UNUSED);
+                clockevents_shutdown(new);
+        }
+        local_irq_restore(flags);
+}
+
+/**
+ * clockevents_shutdown - shutdown the device and clear next_event
+ * @dev:        device to shutdown
+ */
+void clockevents_shutdown(struct clock_event_device *dev)
+{
+        clockevents_set_mode(dev, CLOCK_EVT_MODE_SHUTDOWN);
+        dev->next_event.tv64 = KTIME_MAX;
+}
+
+
 /*
  * Setup the tick device
  */
@@ -1020,20 +1185,29 @@ static void tick_setup_device(struct tick_device *td,
          * First device setup ?
          */
         if (!td->evtdev) {
+        此时钟设备没有相关的时钟事件设备
                 /*
                  * If no cpu took the do_timer update, assign it to
                  * this cpu:
                  */
                 if (tick_do_timer_cpu == TICK_DO_TIMER_BOOT) {
+                        如果没有选定时钟设备来承担全局时钟设备的角色，那么将选择当前设备来承担此职责
+
                         tick_do_timer_cpu = cpu;
+                        设置为当前设备所属处理器编号
                         tick_next_period = ktime_get();
+
                         tick_period = ktime_set(0, NSEC_PER_SEC / HZ);
+                        时钟周期，纳秒
+                        HZ = 1000
                 }
 
                 /*
                  * Startup in periodic mode first.
                  */
                 td->mode = TICKDEV_MODE_PERIODIC;
+                设备运行模式 --> 周期模式
+
         } else {
                 handler = td->evtdev->event_handler;
                 next_event = td->evtdev->next_event;
@@ -1041,6 +1215,7 @@ static void tick_setup_device(struct tick_device *td,
         }
 
         td->evtdev = newdev;
+        为时钟设备指定事件设备
 
         /*
          * When the device is not per cpu, pin the interrupt to the
@@ -1063,3 +1238,100 @@ static void tick_setup_device(struct tick_device *td,
         else
                 tick_setup_oneshot(newdev, handler, next_event);
 }
+
+#define NSEC_PER_SEC    1000000000L
+
+/*
+ * Check, if the device is disfunctional and a place holder, which
+ * needs to be handled by the broadcast device.
+ */
+int tick_device_uses_broadcast(struct clock_event_device *dev, int cpu)
+{               
+        unsigned long flags;
+        int ret = 0; 
+                
+        spin_lock_irqsave(&tick_broadcast_lock, flags);
+                
+        /*
+         * Devices might be registered with both periodic and oneshot
+         * mode disabled. This signals, that the device needs to be
+         * operated from the broadcast device and is a placeholder for
+         * the cpu local device.
+         */
+        if (!tick_device_is_functional(dev)) {
+                dev->event_handler = tick_handle_periodic;
+                cpumask_set_cpu(cpu, tick_get_broadcast_mask());
+                tick_broadcast_start_periodic(tick_broadcast_device.evtdev);
+                ret = 1;
+        } else {                             
+                /*
+                 * When the new device is not affected by the stop
+                 * feature and the cpu is marked in the broadcast mask
+                 * then clear the broadcast bit.
+                 */
+                if (!(dev->features & CLOCK_EVT_FEAT_C3STOP)) {
+                        int cpu = smp_processor_id();
+        
+                        cpumask_clear_cpu(cpu, tick_get_broadcast_mask());
+                        tick_broadcast_clear_oneshot(cpu);
+                }
+        }
+        spin_unlock_irqrestore(&tick_broadcast_lock, flags);
+        return ret;
+}
+
+/*
+ * Setup the device for a periodic tick
+ */
+void tick_setup_periodic(struct clock_event_device *dev, int broadcast)
+{
+        tick_set_periodic_handler(dev, broadcast);
+
+        /* Broadcast setup ? */
+        if (!tick_device_is_functional(dev))
+                return;
+
+        if ((dev->features & CLOCK_EVT_FEAT_PERIODIC) &&
+            !tick_broadcast_oneshot_active()) {
+                clockevents_set_mode(dev, CLOCK_EVT_MODE_PERIODIC);
+        } else {
+                unsigned long seq;
+                ktime_t next;
+
+                do {
+                        seq = read_seqbegin(&xtime_lock);
+                        next = tick_next_period;
+                } while (read_seqretry(&xtime_lock, seq));
+
+                clockevents_set_mode(dev, CLOCK_EVT_MODE_ONESHOT);
+
+                for (;;) {
+                        if (!clockevents_program_event(dev, next, ktime_get()))
+                                return;
+                        next = ktime_add(next, tick_period);
+                }
+        }
+}
+
+/*
+ * Set the periodic handler depending on broadcast on/off
+ */
+void tick_set_periodic_handler(struct clock_event_device *dev, int broadcast)
+{
+        if (!broadcast)
+                dev->event_handler = tick_handle_periodic;
+        else
+                dev->event_handler = tick_handle_periodic_broadcast;
+}               
+
+
+
+start_kernel:
+    init_IRQ()
+
+void __init init_IRQ(void)
+{
+        x86_init.irqs.intr_init();
+}
+
+......
