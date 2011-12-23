@@ -107,6 +107,11 @@ static int notifier_chain_register(struct notifier_block **nl,
 
 当时钟事件设备信息发生变化时调用tick_notifier
 
+
+
+------------------------------------------------------------------------------------------------------------------
+
+
 start_kernel:
      init_timers();
 
@@ -182,18 +187,6 @@ void do_gettimeofday(struct timeval *tv)
         tv->tv_usec = now.tv_nsec/1000;
 }       
 
-/*
- * Simulate gettimeofday using do_gettimeofday which only allows a timeval
- * and therefore only yields usec accuracy
- */     
-void getnstimeofday(struct timespec *tv)
-{       
-        struct timeval x;
-
-        do_gettimeofday(&x);
-        tv->tv_sec = x.tv_sec;
-        tv->tv_nsec = x.tv_usec * NSEC_PER_USEC;
-}
 
 /**
  * getnstimeofday - Returns the time of day in a timespec
@@ -221,6 +214,56 @@ void getnstimeofday(struct timespec *ts)
 
         timespec_add_ns(ts, nsecs);
 }
+
+/* Timekeeper helper functions. */
+static inline s64 timekeeping_get_ns(void)
+{
+        cycle_t cycle_now, cycle_delta;
+        struct clocksource *clock;
+
+        /* read clocksource: */
+        clock = timekeeper.clock;
+        时钟源 PIT/HPET/TSC
+
+        cycle_now = clock->read(clock);
+        读取时钟周期的当前计数值
+
+        /* calculate the delta since the last update_wall_time: */
+        cycle_delta = (cycle_now - clock->cycle_last) & clock->mask;
+
+        /* return delta convert to nanoseconds using ntp adjusted mult. */
+        return clocksource_cyc2ns(cycle_delta, timekeeper.mult,
+                                  timekeeper.shift);
+	转换成纳秒
+}
+
+typedef u64 cycle_t;
+
+/**     
+ *  * clocksource_cyc2ns - converts clocksource cycles to nanoseconds
+ *   *      
+ *    * Converts cycles to nanoseconds, using the given mult and shift.
+ *     *      
+ *      * XXX - This could use some mult_lxl_ll() asm optimization
+ *       */     
+static inline s64 clocksource_cyc2ns(cycle_t cycles, u32 mult, u32 shift)
+{       
+	        return ((u64) cycles * mult) >> shift;
+}
+
+/**
+ *  * timespec_add_ns - Adds nanoseconds to a timespec
+ *   * @a:          pointer to timespec to be incremented
+ *    * @ns:         unsigned nanoseconds value to be added
+ *     *              
+ *      * This must always be inlined because its used from the x86-64 vdso,
+ *       * which cannot call other kernel functions.
+ *        */             
+static __always_inline void timespec_add_ns(struct timespec *a, u64 ns)
+{
+	        a->tv_sec += __iter_div_u64_rem(a->tv_nsec + ns, NSEC_PER_SEC, &ns);
+		        a->tv_nsec = ns;
+}       
 
 
 void __init init_timer_stats(void)
@@ -271,6 +314,8 @@ int raw_notifier_chain_register(struct raw_notifier_head *nh,
 }
 
 
+------------------------------------------------------------------------------------------------------------------
+
 
 start_kernel:
     hrtimers_init();
@@ -284,6 +329,9 @@ void __init hrtimers_init(void)
         open_softirq(HRTIMER_SOFTIRQ, run_hrtimer_softirq);
 #endif
 }
+
+
+------------------------------------------------------------------------------------------------------------------
 
 
 start_kernel:
@@ -306,6 +354,8 @@ void __init timekeeping_init(void)
         ntp_init();
 
         clock = clocksource_default_clock();
+        clock = &clocksource_jiffies
+    
         if (clock->enable)
                 clock->enable(clock);
         timekeeper_setup_internals(clock);
@@ -325,6 +375,142 @@ void __init timekeeping_init(void)
         total_sleep_time.tv_nsec = 0;
         write_sequnlock_irqrestore(&xtime_lock, flags);
 }
+
+
+/**
+ *  * read_boot_clock -  Return time of the system start.
+ *   *
+ *    * Weak dummy function for arches that do not yet support it.
+ *     * Function to read the exact time the system has been started.
+ *      * Returns a timespec with tv_sec=0 and tv_nsec=0 if unsupported.
+ *       *      
+ *        *  XXX - Do be sure to remove it once all arches implement it.
+ *         */
+void __attribute__((weak)) read_boot_clock(struct timespec *ts)
+{
+	        ts->tv_sec = 0;
+		ts->tv_nsec = 0;
+}       
+
+void __init ntp_init(void)
+{       
+        ntp_clear();
+        hrtimer_init(&leap_timer, CLOCK_REALTIME, HRTIMER_MODE_ABS);
+        leap_timer.function = ntp_leap_second;
+}       
+
+/**
+ * ntp_clear - Clears the NTP state variables
+ *
+ * Must be called while holding a write on the xtime_lock
+ */
+void ntp_clear(void)
+{
+        time_adjust     = 0;            /* stop active adjtime() */
+        time_status     |= STA_UNSYNC;
+        time_maxerror   = NTP_PHASE_LIMIT;
+        time_esterror   = NTP_PHASE_LIMIT;
+
+        ntp_update_frequency();
+
+        tick_length     = tick_length_base;
+        time_offset     = 0;
+}
+
+/**     
+ * hrtimer_init - initialize a timer to the given clock
+ * @timer:      the timer to be initialized
+ * @clock_id:   the clock to be used
+ * @mode:       timer mode abs/rel
+ */     
+void hrtimer_init(struct hrtimer *timer, clockid_t clock_id,
+                  enum hrtimer_mode mode)
+{
+        debug_init(timer, clock_id, mode);
+        __hrtimer_init(timer, clock_id, mode);
+}       
+EXPORT_SYMBOL_GPL(hrtimer_init);
+
+static void __hrtimer_init(struct hrtimer *timer, clockid_t clock_id,
+                           enum hrtimer_mode mode)
+{               
+        struct hrtimer_cpu_base *cpu_base;
+        
+        memset(timer, 0, sizeof(struct hrtimer));
+        
+        cpu_base = &__raw_get_cpu_var(hrtimer_bases);
+                
+        if (clock_id == CLOCK_REALTIME && mode != HRTIMER_MODE_ABS)
+                clock_id = CLOCK_MONOTONIC;
+                                         
+        timer->base = &cpu_base->clock_base[clock_id];
+        hrtimer_init_timer_hres(timer);
+        
+#ifdef CONFIG_TIMER_STATS  
+        timer->start_site = NULL;
+        timer->start_pid = -1;
+        memset(timer->start_comm, 0, TASK_COMM_LEN);
+#endif  
+}
+
+
+struct clocksource * __init __weak clocksource_default_clock(void)
+{
+        return &clocksource_jiffies;
+}
+
+
+/**
+ * timekeeper_setup_internals - Set up internals to use clocksource clock.
+ *
+ * @clock:              Pointer to clocksource.
+ *
+ * Calculates a fixed cycle/nsec interval for a given clocksource/adjustment
+ * pair and interval request.
+ *
+ * Unless you're the timekeeping code, you should not be using this!
+ */
+static void timekeeper_setup_internals(struct clocksource *clock)
+{
+        cycle_t interval;
+        u64 tmp;
+
+        timekeeper.clock = clock;
+        clock->cycle_last = clock->read(clock);
+
+        /* Do the ns -> cycle conversion first, using original mult */
+        tmp = NTP_INTERVAL_LENGTH;
+        tmp <<= clock->shift;
+        tmp += clock->mult/2;
+        do_div(tmp, clock->mult);
+        if (tmp == 0)
+                tmp = 1;
+
+        interval = (cycle_t) tmp;
+        timekeeper.cycle_interval = interval;
+
+        /* Go back from cycles -> shifted ns */
+        timekeeper.xtime_interval = (u64) interval * clock->mult;
+        timekeeper.raw_interval =
+                ((u64) interval * clock->mult) >> clock->shift;
+
+        timekeeper.xtime_nsec = 0;
+        timekeeper.shift = clock->shift;
+
+        timekeeper.ntp_error = 0;
+        timekeeper.ntp_error_shift = NTP_SCALE_SHIFT - clock->shift;
+
+        /*
+         * The timekeeper keeps its own mult values for the currently
+         * active clocksource. These value will be adjusted via NTP
+         * to counteract clock drifting.
+         */
+        timekeeper.mult = clock->mult;
+}
+
+
+
+------------------------------------------------------------------------------------------------------------------
 
 
 /*
@@ -1335,3 +1521,102 @@ void __init init_IRQ(void)
 }
 
 ......
+
+run_timer_softirq()
+   --> hrtimer_run_pending()
+	  --> hrtimer_switch_to_hres()
+	        --> tick_init_highres()
+	              --> tick_switch_to_oneshot()
+	                    --> tick_broadcast_switch_to_oneshot()
+	                          --> tick_broadcast_setup_oneshot()
+
+/**
+ * tick_init_highres - switch to high resolution mode
+ *
+ * Called with interrupts disabled.
+ */
+int tick_init_highres(void)
+{
+        return tick_switch_to_oneshot(hrtimer_interrupt);
+}
+
+/**
+ * tick_switch_to_oneshot - switch to oneshot mode
+ */
+int tick_switch_to_oneshot(void (*handler)(struct clock_event_device *))
+{
+        struct tick_device *td = &__get_cpu_var(tick_cpu_device);
+        struct clock_event_device *dev = td->evtdev;
+
+        if (!dev || !(dev->features & CLOCK_EVT_FEAT_ONESHOT) ||
+                    !tick_device_is_functional(dev)) {
+
+                printk(KERN_INFO "Clockevents: "
+                       "could not switch to one-shot mode:");
+                if (!dev) {
+                        printk(" no tick device\n");
+                } else {
+                        if (!tick_device_is_functional(dev))
+                                printk(" %s is not functional.\n", dev->name);
+                        else 
+                                printk(" %s does not support one-shot mode.\n",
+                                       dev->name);
+                }    
+                return -EINVAL;
+        }    
+
+        td->mode = TICKDEV_MODE_ONESHOT;
+        dev->event_handler = handler;
+
+        clockevents_set_mode(dev, CLOCK_EVT_MODE_ONESHOT);
+        tick_broadcast_switch_to_oneshot();
+        return 0;
+}
+
+
+/**
+ * tick_broadcast_setup_oneshot - setup the broadcast device
+ */
+void tick_broadcast_setup_oneshot(struct clock_event_device *bc)
+{
+        /* Set it up only once ! */
+        if (bc->event_handler != tick_handle_oneshot_broadcast) {
+                int was_periodic = bc->mode == CLOCK_EVT_MODE_PERIODIC;
+                int cpu = smp_processor_id();
+
+                bc->event_handler = tick_handle_oneshot_broadcast;
+                clockevents_set_mode(bc, CLOCK_EVT_MODE_ONESHOT);
+
+                /* Take the do_timer update */
+                tick_do_timer_cpu = cpu;
+
+                /*
+                 * We must be careful here. There might be other CPUs
+                 * waiting for periodic broadcast. We need to set the
+                 * oneshot_mask bits for those and program the
+                 * broadcast device to fire.
+                 */
+                cpumask_copy(to_cpumask(tmpmask), tick_get_broadcast_mask());
+                cpumask_clear_cpu(cpu, to_cpumask(tmpmask));
+                cpumask_or(tick_get_broadcast_oneshot_mask(),
+                           tick_get_broadcast_oneshot_mask(),
+                           to_cpumask(tmpmask));
+
+                if (was_periodic && !cpumask_empty(to_cpumask(tmpmask))) {
+                        tick_broadcast_init_next_event(to_cpumask(tmpmask),
+                                                       tick_next_period);
+                        tick_broadcast_set_event(tick_next_period, 1);
+                } else
+                        bc->next_event.tv64 = KTIME_MAX;
+        }
+}
+
+
+
+timer_interrupt() 时钟中断处理程序
+	--> global_clock_event->event_handler(global_clock_event); --> tick_handle_oneshot_broadcast
+
+smp_apic_timer_interrupt()
+	--> local_apic_timer_interrupt()
+	            evt->event_handler(evt);  --> hrtimer_interrupt() 
+
