@@ -109,8 +109,217 @@ static int notifier_chain_register(struct notifier_block **nl,
 
 
 
-------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+start_kernel:
+    init_IRQ()
+
+void __init init_IRQ(void)
+{
+	x86_init.irqs.intr_init();
+        // invoke native_init_IRQ() function
+}
+
+void __init native_init_IRQ(void)
+{                                                                                                                                                          
+        int i;
+
+        /* Execute any quirks before the call gates are initialised: */
+        x86_init.irqs.pre_vector_init();
+        // invoke init_ISA_irqs()
+
+        apic_intr_init();
+
+        /*
+         * Cover the whole vector space, no vector can escape
+         * us. (some of these will be overridden and become
+         * 'special' SMP interrupts)
+         */
+        for (i = FIRST_EXTERNAL_VECTOR; i < NR_VECTORS; i++) {
+                /* IA32_SYSCALL_VECTOR could be used in trap_init already. */
+                if (!test_bit(i, used_vectors))
+                        set_intr_gate(i, interrupt[i-FIRST_EXTERNAL_VECTOR]);
+        }
+
+        if (!acpi_ioapic)
+                setup_irq(2, &irq2);
+
+#ifdef CONFIG_X86_32
+        /*
+         * External FPU? Set up irq13 if so, for
+         * original braindamaged IBM FERR coupling.
+         */
+        if (boot_cpu_data.hard_math && !cpu_has_fpu)
+                setup_irq(FPU_IRQ, &fpu_irq);
+
+        irq_ctx_init(smp_processor_id());
+#endif
+}
+
+void __init init_ISA_irqs(void)
+{      
+        int i;
+
+#if defined(CONFIG_X86_64) || defined(CONFIG_X86_LOCAL_APIC)
+        init_bsp_APIC();
+        // 配置本地LAPIC芯片。该函数调用apic_read或apic_write调用全局变量apic的read和write方法
+#endif 
+        init_8259A(0);
+
+        /*
+         * 16 old-style INTA-cycle interrupts:
+         */
+        for (i = 0; i < NR_IRQS_LEGACY; i++) {
+                struct irq_desc *desc = irq_to_desc(i);
+               
+                desc->status = IRQ_DISABLED;
+                desc->action = NULL;
+                desc->depth = 1;
+
+                set_irq_chip_and_handler_name(i, &i8259A_chip,
+                                              handle_level_irq, "XT");
+        }
+}
+
+void __init init_bsp_APIC(void)
+{
+        unsigned int value;
+        
+        /*
+         * Don't do the setup now if we have a SMP BIOS as the
+         * through-I/O-APIC virtual wire mode might be active.
+         */
+        if (smp_found_config || !cpu_has_apic)
+                return;
+       
+        /*
+         * Do not trust the local APIC being empty at bootup.
+         */
+        clear_local_APIC();
+
+        /*
+         * Enable APIC.
+         */
+        value = apic_read(APIC_SPIV);
+        value &= ~APIC_VECTOR_MASK;
+        value |= APIC_SPIV_APIC_ENABLED;
+
+#ifdef CONFIG_X86_32
+        /* This bit is reserved on P4/Xeon and should be cleared */
+        if ((boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) &&
+            (boot_cpu_data.x86 == 15))
+                value &= ~APIC_SPIV_FOCUS_DISABLED;
+        else
+#endif
+                value |= APIC_SPIV_FOCUS_DISABLED;
+        value |= SPURIOUS_APIC_VECTOR;
+        apic_write(APIC_SPIV, value);
+
+        /*
+         * Set up the virtual wire mode.
+         */
+        apic_write(APIC_LVT0, APIC_DM_EXTINT);
+        value = APIC_DM_NMI;
+        if (!lapic_is_integrated())             /* 82489DX */
+                value |= APIC_LVT_LEVEL_TRIGGER;
+        apic_write(APIC_LVT1, value);
+}
+
+// apic 其代表一块LAPIC控制器芯片 init_bsp_APIC函数实际上调用native_apic_mem_read和native_apic_mem_write等方法
+struct apic *apic = &apic_default;
+
+static void __init apic_intr_init(void)
+{      
+        smp_intr_init();
+
+        // 设置终端描述符表 IDT APIC 相关中断服务程序。也就是把位于32~255之间，除去系统调用外其他中断向量的中断处理程序设置为interrupt[i]
+
+#ifdef CONFIG_X86_THERMAL_VECTOR
+        alloc_intr_gate(THERMAL_APIC_VECTOR, thermal_interrupt);
+#endif
+#ifdef CONFIG_X86_MCE_THRESHOLD
+        alloc_intr_gate(THRESHOLD_APIC_VECTOR, threshold_interrupt);
+#endif
+#if defined(CONFIG_X86_MCE) && defined(CONFIG_X86_LOCAL_APIC)
+        alloc_intr_gate(MCE_SELF_VECTOR, mce_self_interrupt);
+#endif  
+
+#if defined(CONFIG_X86_64) || defined(CONFIG_X86_LOCAL_APIC)
+        /* self generated IPI for local APIC timer */
+        alloc_intr_gate(LOCAL_TIMER_VECTOR, apic_timer_interrupt);
+        // 就是这里。。。。。。
+
+        /* IPI for X86 platform specific use */
+        alloc_intr_gate(X86_PLATFORM_IPI_VECTOR, x86_platform_ipi);
+
+        /* IPI vectors for APIC spurious and error interrupts */
+        alloc_intr_gate(SPURIOUS_APIC_VECTOR, spurious_interrupt);
+        alloc_intr_gate(ERROR_APIC_VECTOR, error_interrupt);
+
+        /* Performance monitoring interrupts: */
+# ifdef CONFIG_PERF_EVENTS
+        alloc_intr_gate(LOCAL_PENDING_VECTOR, perf_pending_interrupt);
+# endif
+
+#endif
+}
+
+#define LOCAL_TIMER_VECTOR              0xef   //239
+
+static inline void alloc_intr_gate(unsigned int n, void *addr)
+{      
+        alloc_system_vector(n);
+        set_intr_gate(n, addr);
+}
+
+tatic inline void alloc_system_vector(int vector)
+{      
+        if (!test_bit(vector, used_vectors)) {
+                set_bit(vector, used_vectors);
+                if (first_system_vector > vector)
+                        first_system_vector = vector;
+        } else
+                BUG();
+}
+
+static inline void set_intr_gate(unsigned int n, void *addr)
+{      
+        BUG_ON((unsigned)n > 0xFF);
+        _set_gate(n, GATE_INTERRUPT, addr, 0, 0, __KERNEL_CS);
+}
+
+static inline void _set_gate(int gate, unsigned type, void *addr,
+                             unsigned dpl, unsigned ist, unsigned seg)
+{      
+        gate_desc s;
+        pack_gate(&s, type, (unsigned long)addr, dpl, ist, seg);
+        /*
+         * does not need to be atomic because it is only done once at
+         * setup time
+         */
+        write_idt_entry(idt_table, gate, &s);
+}
+
+/*
+ * X86_64
+ */
+static inline void pack_gate(gate_desc *gate, unsigned type, unsigned long func,
+                             unsigned dpl, unsigned ist, unsigned seg)
+{      
+        gate->offset_low = PTR_LOW(func);
+        gate->segment = __KERNEL_CS;
+        gate->ist = ist;
+        gate->p = 1;         
+        gate->dpl = dpl;     
+        gate->zero0 = 0;
+        gate->zero1 = 0;
+        gate->type = type;
+        gate->offset_middle = PTR_MIDDLE(func);
+        gate->offset_high = PTR_HIGH(func);
+}
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 start_kernel:
      init_timers();
@@ -1510,17 +1719,6 @@ void tick_set_periodic_handler(struct clock_event_device *dev, int broadcast)
                 dev->event_handler = tick_handle_periodic_broadcast;
 }               
 
-
-
-start_kernel:
-    init_IRQ()
-
-void __init init_IRQ(void)
-{
-        x86_init.irqs.intr_init();
-}
-
-......
 
 run_timer_softirq()
    --> hrtimer_run_pending()
