@@ -140,6 +140,7 @@ void __init native_init_IRQ(void)
                 if (!test_bit(i, used_vectors))
                         set_intr_gate(i, interrupt[i-FIRST_EXTERNAL_VECTOR]);
         }
+	// 设置中断门，处理程序指向 interrupt 数组
 
         if (!acpi_ioapic)
                 setup_irq(2, &irq2);
@@ -155,6 +156,9 @@ void __init native_init_IRQ(void)
         irq_ctx_init(smp_processor_id());
 #endif
 }
+
+#define FIRST_EXTERNAL_VECTOR           0x20
+#define NR_VECTORS                       256
 
 void __init init_ISA_irqs(void)
 {      
@@ -247,6 +251,14 @@ static void __init apic_intr_init(void)
 #if defined(CONFIG_X86_64) || defined(CONFIG_X86_LOCAL_APIC)
         /* self generated IPI for local APIC timer */
         alloc_intr_gate(LOCAL_TIMER_VECTOR, apic_timer_interrupt);
+	/*
+	 *将中断处理函数直接放在中断门得指向地址，这样只要中断到来，一旦通过中断门将直接跳像中断处理函数，而忽略了irq_d         * esc部分，不需要考虑怎么触发，不需要考虑怎么调度
+	 * cat /proc/interrups
+	 * LOC:   71070080   67165396   44751028   31680629   Local timer interrupts
+	 *
+	 * cat /proc/interrupts 也可以看到这些中断与众不同.这些中断左边显示的不是中断请求号，而是一个标识，右边显示的也         * 不是中断控制芯片的信息。
+	 * 
+	 */
         // 就是这里。。。。。。
 
         /* IPI for X86 platform specific use */
@@ -318,6 +330,29 @@ static inline void pack_gate(gate_desc *gate, unsigned type, unsigned long func,
         gate->offset_high = PTR_HIGH(func);
 }
 
+
+BUILD_INTERRUPT(apic_timer_interrupt,LOCAL_TIMER_VECTOR)
+
+#define BUILD_INTERRUPT(name, nr)       BUILD_INTERRUPT3(name, nr, smp_##name)
+
+/*
+ *  Irq entries should be protected against kprobes
+ */
+        .pushsection .kprobes.text, "ax"
+#define BUILD_INTERRUPT3(name, nr, fn)  \
+ENTRY(name)                             \
+        RING0_INT_FRAME;                \
+        pushl $~(nr);                   \
+        CFI_ADJUST_CFA_OFFSET 4;        \
+        SAVE_ALL;                       \
+        TRACE_IRQS_OFF                  \
+        movl %esp,%eax;                 \
+        call fn;                        \
+        jmp ret_from_intr;              \
+        CFI_ENDPROC;                    \
+ENDPROC(name)
+
+当 cpu 执行完一条指令后会见查是否有中断发生，此时 assume Local APIC 发生中断请求，cpu 则根据中断号在中断描述符表中查找到段选择子，进而找到处理程序，此时就是执行 apic_timer_interrupt,然后 call smp_apic_timer_interrupt ...... 于是发生了一些很重要的事情。
 
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 
