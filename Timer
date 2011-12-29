@@ -109,7 +109,7 @@ static int notifier_chain_register(struct notifier_block **nl,
 
 
 
----------------------------------------------------------------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------
 
 start_kernel:
     init_IRQ()
@@ -354,7 +354,7 @@ ENDPROC(name)
 
 当 cpu 执行完一条指令后会见查是否有中断发生，此时 assume Local APIC 发生中断请求，cpu 则根据中断号在中断描述符表中查找到段选择子，进而找到处理程序，此时就是执行 apic_timer_interrupt,然后 call smp_apic_timer_interrupt ...... 于是发生了一些很重要的事情。
 
----------------------------------------------------------------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------
 
 start_kernel:
      init_timers();
@@ -369,7 +369,7 @@ void __init init_timers(void)
         BUG_ON(err == NOTIFY_BAD);
         register_cpu_notifier(&timers_nb);
         open_softirq(TIMER_SOFTIRQ, run_timer_softirq);
-        软中断 下半步 高精度 timer.
+        // 软中断 下半步 高精度 timer.
 }
 
 static struct notifier_block __cpuinitdata timers_nb = {
@@ -399,12 +399,89 @@ static int __cpuinit timer_cpu_notify(struct notifier_block *self,
         return NOTIFY_OK;
 }
 
+static int __cpuinit init_timers_cpu(int cpu)
+{
+        int j;
+        struct tvec_base *base;
+        static char __cpuinitdata tvec_base_done[NR_CPUS];
+
+        if (!tvec_base_done[cpu]) {
+                static char boot_done;
+
+                if (boot_done) {
+                        /*
+                         * The APs use this path later in boot
+                         */
+                        base = kmalloc_node(sizeof(*base),
+                                                GFP_KERNEL | __GFP_ZERO,
+                                                cpu_to_node(cpu));
+                        if (!base)
+                                return -ENOMEM;
+
+                        /* Make sure that tvec_base is 2 byte aligned */
+                        if (tbase_get_deferrable(base)) {
+                                WARN_ON(1);
+                                kfree(base);
+                                return -ENOMEM;
+                        }
+                        per_cpu(tvec_bases, cpu) = base;
+                } else {
+                        /*
+                         * This is for the boot CPU - we use compile-time
+                         * static initialisation because per-cpu memory isn't
+                         * ready yet and because the memory allocators are not
+                         * initialised either.
+                         */
+                        boot_done = 1;
+                        base = &boot_tvec_bases;
+                }
+                tvec_base_done[cpu] = 1;
+        } else {
+                base = per_cpu(tvec_bases, cpu);
+        }
+
+        spin_lock_init(&base->lock);
+
+        for (j = 0; j < TVN_SIZE; j++) {
+                INIT_LIST_HEAD(base->tv5.vec + j);
+                INIT_LIST_HEAD(base->tv4.vec + j);
+                INIT_LIST_HEAD(base->tv3.vec + j);
+                INIT_LIST_HEAD(base->tv2.vec + j);
+        }
+        for (j = 0; j < TVR_SIZE; j++)
+                INIT_LIST_HEAD(base->tv1.vec + j);
+
+        base->timer_jiffies = jiffies;
+        // 设置成自系统启动以来产生的节拍数。
+        base->next_timer = base->timer_jiffies;
+        return 0;
+}
+
+struct tvec_base {
+        spinlock_t lock;
+        struct timer_list *running_timer;
+        unsigned long timer_jiffies;
+        unsigned long next_timer;
+        struct tvec_root tv1;
+        struct tvec tv2;
+        struct tvec tv3;
+        struct tvec tv4;
+        struct tvec tv5;
+} ____cacheline_aligned;
+
+
 static inline uint32_t raid6_jiffies(void)
 {               
         struct timeval tv;
         gettimeofday(&tv, NULL);
         return tv.tv_sec*1000 + tv.tv_usec/1000;
 }    
+
+struct timeval {
+        __kernel_time_t         tv_sec;         /* seconds */
+        __kernel_suseconds_t    tv_usec;        /* microseconds */
+};
+
 
 static __always_inline int gettimeofday(struct timeval *tv, struct timezone *tz)
 {
@@ -427,10 +504,18 @@ void do_gettimeofday(struct timeval *tv)
         struct timespec now;
                 
         getnstimeofday(&now);
+	// now 中返回当前时间 秒数以及纳秒数
+	
         tv->tv_sec = now.tv_sec;
+	// 秒数
         tv->tv_usec = now.tv_nsec/1000;
+	// now.tv_nsec 不足一秒的纳秒数 转换为微妙数.
 }       
 
+struct timeval {
+        __kernel_time_t         tv_sec;         /* seconds */
+        __kernel_suseconds_t    tv_usec;        /* microseconds */
+}; 
 
 /**
  * getnstimeofday - Returns the time of day in a timespec
@@ -452,12 +537,18 @@ void getnstimeofday(struct timespec *ts)
                 nsecs = timekeeping_get_ns();
 
                 /* If arch requires, add in gettimeoffset() */
-                nsecs += arch_gettimeoffset();
+                nsecs += arch_gettimeoffset(); // NULL function ?
 
         } while (read_seqretry(&xtime_lock, seq));
 
         timespec_add_ns(ts, nsecs);
+        // add nsecs 到 struct timespec 结构.
 }
+
+truct timespec {
+        time_t  tv_sec;         /* seconds */
+        long    tv_nsec;        /* nanoseconds */
+};
 
 /* Timekeeper helper functions. */
 static inline s64 timekeeping_get_ns(void)
@@ -467,10 +558,10 @@ static inline s64 timekeeping_get_ns(void)
 
         /* read clocksource: */
         clock = timekeeper.clock;
-        时钟源 PIT/HPET/TSC
+        // 时钟源 PIT/HPET/TSC
 
         cycle_now = clock->read(clock);
-        读取时钟周期的当前计数值
+        // 读取时钟周期的当前计数值
 
         /* calculate the delta since the last update_wall_time: */
         cycle_delta = (cycle_now - clock->cycle_last) & clock->mask;
@@ -478,8 +569,34 @@ static inline s64 timekeeping_get_ns(void)
         /* return delta convert to nanoseconds using ntp adjusted mult. */
         return clocksource_cyc2ns(cycle_delta, timekeeper.mult,
                                   timekeeper.shift);
-	转换成纳秒
+	//转换成纳秒
 }
+
+/* Structure holding internal timekeeping values. */
+struct timekeeper {
+        /* Current clocksource used for timekeeping. */
+        struct clocksource *clock;
+        /* The shift value of the current clocksource. */
+        int     shift;
+
+        /* Number of clock cycles in one NTP interval. */
+        cycle_t cycle_interval; 
+        /* Number of clock shifted nano seconds in one NTP interval. */
+        u64     xtime_interval;
+        /* Raw nano seconds accumulated per NTP interval. */
+        u32     raw_interval;
+
+        /* Clock shifted nano seconds remainder not stored in xtime.tv_nsec. */
+        u64     xtime_nsec;
+        /* Difference between accumulated time and NTP time in ntp
+         * shifted nano seconds. */
+        s64     ntp_error;
+        /* Shift conversion between clock shifted nano seconds and
+         * ntp shifted nano seconds. */
+        int     ntp_error_shift;
+        /* NTP adjusted clock multiplier */
+        u32     mult;
+};
 
 typedef u64 cycle_t;
 
@@ -506,9 +623,36 @@ static inline s64 clocksource_cyc2ns(cycle_t cycles, u32 mult, u32 shift)
 static __always_inline void timespec_add_ns(struct timespec *a, u64 ns)
 {
 	        a->tv_sec += __iter_div_u64_rem(a->tv_nsec + ns, NSEC_PER_SEC, &ns);
-		        a->tv_nsec = ns;
+                // 返回 秒数 一般情况下返回 0
+		a->tv_nsec = ns;
+		// 不足 1s 的纳秒数 (此值会一直叠加)
 }       
 
+
+static __always_inline u32
+__iter_div_u64_rem(u64 dividend, u32 divisor, u64 *remainder)
+{       
+	// dividend = a->tv_nsec + ns
+        u32 ret = 0;
+
+        while (dividend >= divisor) {
+		// 如果 纳秒大于一秒 NSEC_PER_SEC 
+
+                /* The following asm() prevents the compiler from
+                   optimising this loop into a modulo operation.  */
+                asm("" : "+rm"(dividend));
+
+                dividend -= divisor;
+		// 减去一秒
+
+                ret++;
+		// 秒数加1
+        }
+        
+        *remainder = dividend;
+
+        return ret;
+}
 
 void __init init_timer_stats(void)
 {                                    
@@ -770,50 +914,53 @@ start_kernel:
         if (late_time_init)
              late_time_init();
 
-/*              
- * The platform setup functions are preset with the default functions
- * for standard PC hardware.
- */     
-struct x86_init_ops x86_init __initdata = {
-        
-        .resources = {
-                .probe_roms             = probe_roms,
-                .reserve_resources      = reserve_standard_io_resources,
-                .memory_setup           = default_machine_specific_memory_setup,
-        },
-
-        .mpparse = {
-                .mpc_record             = x86_init_uint_noop,
-                .setup_ioapic_ids       = x86_init_noop,
-                .mpc_apic_id            = default_mpc_apic_id,
-                .smp_read_mpc_oem       = default_smp_read_mpc_oem,
-                .mpc_oem_bus_info       = default_mpc_oem_bus_info,
-                .find_smp_config        = default_find_smp_config,
-                .get_smp_config         = default_get_smp_config,
-        },
-
-        .irqs = {
-                .pre_vector_init        = init_ISA_irqs,
-                .intr_init              = native_init_IRQ,
-                .trap_init              = x86_init_noop,
-        }, 
-                
-        .oem = {
-                .arch_setup             = x86_init_noop,
-                .banner                 = default_banner,
-        },
-
-        .paging = {
-                .pagetable_setup_start  = native_pagetable_setup_start,
-                .pagetable_setup_done   = native_pagetable_setup_done,
-        },
-
-        .timers = {
-                .setup_percpu_clockev   = setup_boot_APIC_clock,
-                .tsc_pre_init           = x86_init_noop,
-                .timer_init             = hpet_time_init,
-        },
-};
++----------------------------------------------------------------------------------------+
+|       /*                                                                               |
+|        * The platform setup functions are preset with the default functions            |
+|        * for standard PC hardware.                                                     |
+|        */                                                                              |
+|       struct x86_init_ops x86_init __initdata = {                                      |
+|                                                                                        |
+|               .resources = {                                                           |
+|                       .probe_roms             = probe_roms,                            |
+|                       .reserve_resources      = reserve_standard_io_resources,         |
+|                       .memory_setup           = default_machine_specific_memory_setup, |
+|               },                                                                       |
+|                                                                                        |
+|               .mpparse = {                                                             |
+|                       .mpc_record             = x86_init_uint_noop,                    |
+|                       .setup_ioapic_ids       = x86_init_noop,                         |
+|                       .mpc_apic_id            = default_mpc_apic_id,                   |
+|                       .smp_read_mpc_oem       = default_smp_read_mpc_oem,              |
+|                       .mpc_oem_bus_info       = default_mpc_oem_bus_info,              |
+|                       .find_smp_config        = default_find_smp_config,               |
+|                       .get_smp_config         = default_get_smp_config,                |
+|               },                                                                       |
+|                                                                                        |
+|               .irqs = {                                                                |
+|                       .pre_vector_init        = init_ISA_irqs,                         |
+|                       .intr_init              = native_init_IRQ,                       |
+|                       .trap_init              = x86_init_noop,                         |
+|               },                                                                       |
+|                                                                                        |
+|               .oem = {                                                                 |
+|                       .arch_setup             = x86_init_noop,                         |
+|                       .banner                 = default_banner,                        |
+|               },                                                                       |
+|                                                                                        |
+|               .paging = {                                                              |
+|                       .pagetable_setup_start  = native_pagetable_setup_start,          |
+|                       .pagetable_setup_done   = native_pagetable_setup_done,           |
+|               },                                                                       |
+|                                                                                        |
+|               .timers = {                                                              |
+|                       .setup_percpu_clockev   = setup_boot_APIC_clock,                 |
+|                       .tsc_pre_init           = x86_init_noop,                         |
+|                       .timer_init             = hpet_time_init,                        |
+|               },                                                                       |
+|       };                                                                               |
+|                                                                                        |
++----------------------------------------------------------------------------------------+
 
 
 static __init void x86_late_time_init(void)
@@ -950,19 +1097,22 @@ static int hpet_clocksource_register(void)
         return 0;
 }
 
-static struct clocksource clocksource_hpet = {
-        .name           = "hpet",
-        .rating         = 250,
-        .read           = read_hpet,
-        .mask           = HPET_MASK,
-        .shift          = HPET_SHIFT,
-        .flags          = CLOCK_SOURCE_IS_CONTINUOUS,
-        .resume         = hpet_resume_counter,
-#ifdef CONFIG_X86_64
-        .vread          = vread_hpet,
-#endif          
-};    
-
++------------------------------------------------------------------+
+|                                                                  |
+|       static struct clocksource clocksource_hpet = {             |
+|               .name           = "hpet",                          |
+|               .rating         = 250,                             |
+|               .read           = read_hpet,                       |
+|               .mask           = HPET_MASK,                       |
+|               .shift          = HPET_SHIFT,                      |
+|               .flags          = CLOCK_SOURCE_IS_CONTINUOUS,      |
+|               .resume         = hpet_resume_counter,             |
+|       #ifdef CONFIG_X86_64                                       |
+|               .vread          = vread_hpet,                      |
+|       #endif                                                     |
+|       };                                                         |
+|                                                                  |
++------------------------------------------------------------------+
 
 /**
  * clocksource_register - Used to install new clocksources
@@ -1092,18 +1242,21 @@ static void hpet_legacy_clockevent_register(void)
         printk(KERN_DEBUG "hpet clockevent registered\n");
 }
 
-/*      
- * The hpet clock event device
- */
-static struct clock_event_device hpet_clockevent = {
-        .name           = "hpet",
-        .features       = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,
-        .set_mode       = hpet_legacy_set_mode,
-        .set_next_event = hpet_legacy_next_event,
-        .shift          = 32,
-        .irq            = 0, 
-        .rating         = 50,
-};
++------------------------------------------------------------------------------------+
+|                                                                                    |
+|       /*                                                                           |
+|        * The hpet clock event device                                               |
+|        */                                                                          |
+|       static struct clock_event_device hpet_clockevent = {                         |
+|       	.name           = "hpet",                                            |
+|       	.features       = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,  |
+|       	.set_mode       = hpet_legacy_set_mode,                              |
+|       	.set_next_event = hpet_legacy_next_event,                            |
+|       	.shift          = 32,                                                |
+|       	.irq            = 0,                                                 |
+|       	.rating         = 50,                                                |
+|       };                                                                           |
++------------------------------------------------------------------------------------+
 
 /*              
  * Initialize the conversion factor and the min/max deltas of the clock event
@@ -1124,33 +1277,40 @@ void __init setup_pit_timer(void)
         global_clock_event = &pit_ce;
 }       
 
-/*
- * On UP the PIT can serve all of the possible timer functions. On SMP systems
- * it can be solely used for the global tick.
- *
- * The profiling and update capabilities are switched off once the local apic is
- * registered. This mechanism replaces the previous #ifdef LOCAL_APIC -
- * !using_apic_timer decisions in do_timer_interrupt_hook()
- */
-static struct clock_event_device pit_ce = {
-        .name           = "pit",
-        .features       = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,
-        .set_mode       = init_pit_timer,
-        .set_next_event = pit_next_event,
-        .shift          = 32,
-        .irq            = 0,
-};
++-----------------------------------------------------------------------------------------+
+|                                                                                         |
+|       /*                                                                                |
+|        * On UP the PIT can serve all of the possible timer functions. On SMP systems    |
+|        * it can be solely used for the global tick.                                     |
+|        *                                                                                |
+|        * The profiling and update capabilities are switched off once the local apic is  |
+|        * registered. This mechanism replaces the previous #ifdef LOCAL_APIC -           |
+|        * !using_apic_timer decisions in do_timer_interrupt_hook()                       |
+|        */                                                                               |
+|       static struct clock_event_device pit_ce = {                                       |
+|               .name           = "pit",                                                  |
+|               .features       = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,       |
+|               .set_mode       = init_pit_timer,                                         |
+|               .set_next_event = pit_next_event,                                         |
+|               .shift          = 32,                                                     |
+|               .irq            = 0,                                                      |
+|       };                                                                                |
++-----------------------------------------------------------------------------------------+
 
 void __init setup_default_timer_irq(void)
 {       
         setup_irq(0, &irq0);
 }
 
-static struct irqaction irq0  = {
-        .handler = timer_interrupt,
-        .flags = IRQF_DISABLED | IRQF_NOBALANCING | IRQF_IRQPOLL | IRQF_TIMER,
-        .name = "timer"
-};
++-----------------------------------------------------------------------------------------+
+|                                                                                         |
+|       static struct irqaction irq0  = {                                                 |
+|               .handler = timer_interrupt,                                               |
+|               .flags = IRQF_DISABLED | IRQF_NOBALANCING | IRQF_IRQPOLL | IRQF_TIMER,    |
+|               .name = "timer"                                                           |
+|       };                                                                                |
++-----------------------------------------------------------------------------------------+
+
 
 void __init tsc_init(void)
 {
@@ -1230,68 +1390,73 @@ static void __init init_tsc_clocksource(void)
         clocksource_register(&clocksource_tsc);
 }
 
++-------------------------------------------------------------------------+
+|                                                                         |
+|                                                                         |
+|      static struct clocksource clocksource_tsc = {                      |
+|               .name                   = "tsc",                          |
+|               .rating                 = 300,                            |
+|               .read                   = read_tsc,                       |
+|               .resume                 = resume_tsc,                     |
+|               .mask                   = CLOCKSOURCE_MASK(64),           |
+|               .shift                  = 22,                             |
+|               .flags                  = CLOCK_SOURCE_IS_CONTINUOUS |    |
+|                                         CLOCK_SOURCE_MUST_VERIFY,       |
+|       #ifdef CONFIG_X86_64                                              |
+|               .vread                  = vread_tsc,                      |
+|       #endif                                                            |
+|       };                                                                |
+|                                                                         |
++-------------------------------------------------------------------------+
 
-static struct clocksource clocksource_tsc = {
-        .name                   = "tsc",
-        .rating                 = 300,
-        .read                   = read_tsc,
-        .resume                 = resume_tsc,
-        .mask                   = CLOCKSOURCE_MASK(64),
-        .shift                  = 22,
-        .flags                  = CLOCK_SOURCE_IS_CONTINUOUS |
-                                  CLOCK_SOURCE_MUST_VERIFY,
-#ifdef CONFIG_X86_64
-        .vread                  = vread_tsc,
-#endif
-};
+        # cat /proc/timer_list | more
+
+        Tick Device: mode:     1                      --> one-shot 单次 
+        Broadcast device
+        Clock Event Device: hpet
+         max_delta_ns:   149983013276
+         min_delta_ns:   13409
+         mult:           61496111
+         shift:          32
+         mode:           3
+         next_event:     21524167000000 nsecs
+         set_next_event: hpet_legacy_next_event
+         set_mode:       hpet_legacy_set_mode
+         event_handler:  tick_handle_oneshot_broadcast
+         retries:        1459862
+        tick_broadcast_mask: 00000001
+        tick_broadcast_oneshot_mask: 00000002
 
 
-# cat /proc/timer_list | more
-Tick Device: mode:     1                      --> one-shot 单次 
-Broadcast device
-Clock Event Device: hpet
- max_delta_ns:   149983013276
- min_delta_ns:   13409
- mult:           61496111
- shift:          32
- mode:           3
- next_event:     21524167000000 nsecs
- set_next_event: hpet_legacy_next_event
- set_mode:       hpet_legacy_set_mode
- event_handler:  tick_handle_oneshot_broadcast
- retries:        1459862
-tick_broadcast_mask: 00000001
-tick_broadcast_oneshot_mask: 00000002
+        Tick Device: mode:     1
+        Per CPU device: 0
+        Clock Event Device: lapic
+         max_delta_ns:   128824925406
+         min_delta_ns:   1000
+         mult:           71596176
+         shift:          32
+         mode:           3
+         next_event:     21524167000000 nsecs
+         set_next_event: lapic_next_event
+         set_mode:       lapic_timer_setup
+         event_handler:  hrtimer_interrupt
+         retries:        891537
 
+        Tick Device: mode:     1
+        Per CPU device: 1
+        Clock Event Device: lapic
+         max_delta_ns:   128824925406
+         min_delta_ns:   1000
+         mult:           71596176
+         shift:          32
+         mode:           1
+         next_event:     21524167000000 nsecs
+         set_next_event: lapic_next_event
+         set_mode:       lapic_timer_setup
+         event_handler:  hrtimer_interrupt
+         retries:        539190
 
-Tick Device: mode:     1
-Per CPU device: 0
-Clock Event Device: lapic
- max_delta_ns:   128824925406
- min_delta_ns:   1000
- mult:           71596176
- shift:          32
- mode:           3
- next_event:     21524167000000 nsecs
- set_next_event: lapic_next_event
- set_mode:       lapic_timer_setup
- event_handler:  hrtimer_interrupt
- retries:        891537
-
-Tick Device: mode:     1
-Per CPU device: 1
-Clock Event Device: lapic
- max_delta_ns:   128824925406
- min_delta_ns:   1000
- mult:           71596176
- shift:          32
- mode:           1
- next_event:     21524167000000 nsecs
- set_next_event: lapic_next_event
- set_mode:       lapic_timer_setup
- event_handler:  hrtimer_interrupt
- retries:        539190
-
+ 
 /**
  * clockevents_register_device - register a clock event device
  * @dev:        device to register
