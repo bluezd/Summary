@@ -1301,6 +1301,19 @@ void timekeeping_notify(struct clocksource *clock)
         tick_clock_notify();*
 }
 
+
+/**     
+ * Async notification about clocksource changes
+ */     
+void tick_clock_notify(void)
+{
+        int cpu;
+
+        for_each_possible_cpu(cpu)
+                set_bit(0, &per_cpu(tick_cpu_sched, cpu).check_clocks);
+}
+
+
 /**
  * change_clocksource - Swaps clocksources if a new one is available
  *
@@ -1322,7 +1335,7 @@ static int change_clocksource(void *data)
                 old = timekeeper.clock;
                 timekeeper_setup_internals(new);
 		// 设置新的时钟源 tsc
-		//
+
                 if (old->disable)
                         old->disable(old);
         }
