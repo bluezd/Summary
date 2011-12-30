@@ -742,7 +742,7 @@ void __init timekeeping_init(void)
         ntp_init();
 
         clock = clocksource_default_clock();
-        clock = &clocksource_jiffies
+        // clock = &clocksource_jiffies
     
         if (clock->enable)
                 clock->enable(clock);
@@ -864,6 +864,8 @@ static void timekeeper_setup_internals(struct clocksource *clock)
         u64 tmp;
 
         timekeeper.clock = clock;
+	// 设置时钟源 time_keeper gettimeofday 会通过 timer_keeper layer 获取 wall time
+	
         clock->cycle_last = clock->read(clock);
 
         /* Do the ns -> cycle conversion first, using original mult */
@@ -1140,6 +1142,7 @@ static void clocksource_enqueue(struct clocksource *cs)
 {
         struct list_head *entry = &clocksource_list;
         // static LIST_HEAD(clocksource_list);
+	// head prev 都指向自己
 
         struct clocksource *tmp;
 
@@ -1148,8 +1151,45 @@ static void clocksource_enqueue(struct clocksource *cs)
                 if (tmp->rating >= cs->rating)
                         entry = &tmp->list;
         list_add(&cs->list, entry);
+	// 插入到双向循环链表中 pit --> hpet --> tsc --> head(clocksource_list)
 }
 
+
+                             head
+                     +-->>+---------+<-+
+                     |    |         |  |
+                     | +----.next   |  |
+                     | |  |         |  |
+                     | |  | .prev -----------+
+                     | |  |         |  |     |
+                     | |  +---------+  |     |
+                     | |               |     |
+                     | |     TSC       |     |
+                     | +->+---------+<---+   |
+                     |    |         |  | |   |
+                     | +----.next   |  | |   |
+                     | |  |         |  | |   |
+                     | |  | .prev -----+ |   |
+                     | |  |         |    |   |
+                     | |  +---------+    |   |
+                     | |                 |   |
+                     | |     HPET        |   |
+                     | +->+---------+<-----+ |
+                     |    |         |    | | |
+                     | +----.next   |    | | |
+                     | |  |         |    | | |
+                     | |  | .prev -------+ | |
+                     | |  |         |      | |
+                     | |  +---------+      | |
+                     | |                   | |
+                     | |     PIT           | |
+                     | +->+---------+<<------+
+                     |    |         |      |
+                     +------.next   |      |
+                          |         |      |
+                          | .prev ---------+
+                          |         |
+                          +---------+
 
 /**
  * clocksource_select - Select the best clocksource available
@@ -1165,8 +1205,12 @@ static void clocksource_select(void)
 
         if (!finished_booting || list_empty(&clocksource_list))
                 return;
+        // 此时 finished_booting = 0,所以 closksource_select 函数直接返回。在系统初始化快结束时调用 clocksource_done_booting() 会设置finished_booting = 1,紧接着调用 clocksource_select() 进行真正的时钟源选择。
+	
         /* First clocksource on the list has the best rating. */
         best = list_first_entry(&clocksource_list, struct clocksource, list);
+        // 如上图中的链表中第一个就是最好的时钟源
+	
         /* Check for the override clocksource. */
         list_for_each_entry(cs, &clocksource_list, list) {
                 if (strcmp(cs->name, override_name) != 0)
@@ -1190,10 +1234,54 @@ static void clocksource_select(void)
         }
         if (curr_clocksource != best) {
                 printk(KERN_INFO "Switching to clocksource %s\n", best->name);
+		// Switching to clocksource tsc log from dmesg . :-)
+
                 curr_clocksource = best;
+		// 保存当前使用的时钟源
+
                 timekeeping_notify(curr_clocksource);
+		// Install a new clocksource
         }
 }
+
+
+在此之前会注册几种时钟源
+比如:
+     core_initcall(init_jiffies_clocksource);
+     fs_initcall(init_acpi_pm_clocksource);
+
+ +-----------------------------------------+
+ | fs_initcall(clocksource_done_booting);  |
+ +-----------------------------------------+
+
+#define fs_initcall(fn)                 __define_initcall("5",fn,5)
+
+/*
+ * clocksource_done_booting - Called near the end of core bootup
+ *
+ * Hack to avoid lots of clocksource churn at boot time.
+ * We use fs_initcall because we want this to start before
+ * device_initcall but after subsys_initcall.
+ */
+static int __init clocksource_done_booting(void)
+{       
+        finished_booting = 1;
+	// 表示初始化完成
+                        
+        /*      
+         * Run the watchdog first to eliminate unstable clock sources
+         */
+        clocksource_watchdog_kthread(NULL);
+
+        mutex_lock(&clocksource_mutex);
+
+        clocksource_select();
+	// 选择最好的时钟源
+	
+        mutex_unlock(&clocksource_mutex);
+        return 0;       
+}                 
+
 
 /**                     
  * timekeeping_notify - Install a new clock source
@@ -1206,9 +1294,72 @@ void timekeeping_notify(struct clocksource *clock)
 {                       
         if (timekeeper.clock == clock)
                 return;
+	// clock = &clocksource_tsc .
+	// 此时 clock = &clocksource_jiffies .
+	
         stop_machine(change_clocksource, clock, NULL);
-        tick_clock_notify();
+        tick_clock_notify();*
 }
+
+/**
+ * change_clocksource - Swaps clocksources if a new one is available
+ *
+ * Accumulates current time interval and initializes new clocksource
+ */
+static int change_clocksource(void *data)
+{
+        struct clocksource *new, *old;
+
+        new = (struct clocksource *) data;
+	// new = $clocksource_tsc .
+
+        timekeeping_forward_now();
+	// 更新时间
+
+        if (!new->enable || new->enable(new) == 0) {
+		// new->enable == NULL
+
+                old = timekeeper.clock;
+                timekeeper_setup_internals(new);
+		// 设置新的时钟源 tsc
+		//
+                if (old->disable)
+                        old->disable(old);
+        }
+        return 0;
+}
+
+
+/**             
+ * timekeeping_forward_now - update clock to the current time
+ *              
+ * Forward the current clock to update its state since the last call to
+ * update_wall_time(). This is useful before significant clock changes,
+ * as it avoids having to deal with this time offset explicitly.
+ */
+static void timekeeping_forward_now(void)
+{
+        cycle_t cycle_now, cycle_delta;
+        struct clocksource *clock;
+        s64 nsec;
+
+        clock = timekeeper.clock;
+        cycle_now = clock->read(clock);
+        cycle_delta = (cycle_now - clock->cycle_last) & clock->mask;
+        clock->cycle_last = cycle_now;
+        
+        nsec = clocksource_cyc2ns(cycle_delta, timekeeper.mult,
+                                  timekeeper.shift);
+        
+        /* If arch requires, add in gettimeoffset() */
+        nsec += arch_gettimeoffset();
+
+        timespec_add_ns(&xtime, nsec);
+
+        nsec = clocksource_cyc2ns(cycle_delta, clock->mult, clock->shift);
+        timespec_add_ns(&raw_time, nsec);
+}
+
 
 
 static void hpet_legacy_clockevent_register(void)
