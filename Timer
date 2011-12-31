@@ -21,7 +21,7 @@ static struct notifier_block tick_notifier = {
  */
 int clockevents_register_notifier(struct notifier_block *nb)
 {
-        nb = &tick_notifier
+        // nb = &tick_notifier
         unsigned long flags;
         int ret;
 
@@ -1620,14 +1620,41 @@ static void __init init_tsc_clocksource(void)
          event_handler:  hrtimer_interrupt
          retries:        539190
 
+clock event device 有三种 PIT HPET APIC
+                          PIT/HPET Global clock event device
+			  APIC     Local clock event device
  
+setup_APIC_timer()
+        |
+        +----> clockevents_register_device(levt);
+
+
+ +----------------------------------------------------------------------------------+
+ |      /*                                                                          |
+ |       * The local apic timer can be used for any function which is CPU local.    |
+ |       */                                                                         |
+ |      static struct clock_event_device lapic_clockevent = {                       |
+ |              .name           = "lapic",                                          |
+ |              .features       = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT  |
+ |                              | CLOCK_EVT_FEAT_C3STOP | CLOCK_EVT_FEAT_DUMMY,     |
+ |              .shift          = 32,                                               |
+ |              .set_mode       = lapic_timer_setup,                                |
+ |              .set_next_event = lapic_next_event,                                 |
+ |              .broadcast      = lapic_timer_broadcast,                            |
+ |              .rating         = 100,                                              |
+ |              .irq            = -1,                                               |
+ |      };                                                                          |
+ |                                                                                  |
+ +----------------------------------------------------------------------------------+
+ 
+
 /**
  * clockevents_register_device - register a clock event device
  * @dev:        device to register
  */
 void clockevents_register_device(struct clock_event_device *dev)
 {
-        dev=&hpet_clockevent
+        // dev=&hpet_clockevent
 
         unsigned long flags;
 
@@ -1637,11 +1664,15 @@ void clockevents_register_device(struct clock_event_device *dev)
         spin_lock_irqsave(&clockevents_lock, flags);
 
         list_add(&dev->list, &clockevent_devices);
+	// 加入到 clockevent_devices 链表中
         clockevents_do_notify(CLOCK_EVT_NOTIFY_ADD, dev);
         clockevents_notify_released();
 
         spin_unlock_irqrestore(&clockevents_lock, flags);
 }
+
+static LIST_HEAD(clockevent_devices);
+
 
 /* Clock event notification values */
 enum clock_event_nofitiers {
@@ -1666,6 +1697,16 @@ static void clockevents_do_notify(unsigned long reason, void *dev)
         raw_notifier_call_chain(&clockevents_chain, reason, dev);
 }
 
+
+/* Notification for clock events */
+static RAW_NOTIFIER_HEAD(clockevents_chain);
+
+#define RAW_NOTIFIER_HEAD(name)                                 \
+        struct raw_notifier_head name =                         \
+	                RAW_NOTIFIER_INIT(name)
+
+#define RAW_NOTIFIER_INIT(name) {                               \
+                .head = NULL }
 
 
 /**     
