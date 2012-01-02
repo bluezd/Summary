@@ -493,6 +493,34 @@ static __always_inline int gettimeofday(struct timeval *tv, struct timezone *tz)
         return ret;
 }       
 
+
+ +------------------------------+
+ |                              |
+ |    系统调用 gettimeofday     |
+ |                              |
+ +------------------------------+
+
+SYSCALL_DEFINE2(gettimeofday, struct timeval __user *, tv,
+                struct timezone __user *, tz)
+{      
+        if (likely(tv != NULL)) {                                                                                                              
+                struct timeval ktv;                                                                                                            
+                do_gettimeofday(&ktv);
+                if (copy_to_user(tv, &ktv, sizeof(ktv)))
+                        return -EFAULT;
+                // 操作系统和驱动程序在内核空间运行，应用程序在用户空间运行，两者不能简单地使用指针传递数据. 因为Linux系统使用了虚拟内存机制，用户空间的内存可能被换出，当内核空间使用用户空间指针时，对应的数据可能不在内存中
+        }
+        if (unlikely(tz != NULL)) {
+                if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
+                        return -EFAULT;
+        }
+        return 0;
+}
+
+#define SYSCALL_DEFINE2(name, ...) SYSCALL_DEFINEx(2, _##name, __VA_ARGS__)
+
+
+
 /**             
  * do_gettimeofday - Returns the time of day in a timeval
  * @tv:         pointer to the timeval to be set
@@ -1155,7 +1183,7 @@ static void clocksource_enqueue(struct clocksource *cs)
 }
 
 
-                             head
+//                           head
                      +-->>+---------+<-+
                      |    |         |  |
                      | +----.next   |  |
@@ -1164,7 +1192,7 @@ static void clocksource_enqueue(struct clocksource *cs)
                      | |  |         |  |     |
                      | |  +---------+  |     |
                      | |               |     |
-                     | |     TSC       |     |
+//                   | |     TSC       |     |
                      | +->+---------+<---+   |
                      |    |         |  | |   |
                      | +----.next   |  | |   |
@@ -1173,7 +1201,7 @@ static void clocksource_enqueue(struct clocksource *cs)
                      | |  |         |    |   |
                      | |  +---------+    |   |
                      | |                 |   |
-                     | |     HPET        |   |
+//                   | |     HPET        |   |
                      | +->+---------+<-----+ |
                      |    |         |    | | |
                      | +----.next   |    | | |
@@ -1182,7 +1210,7 @@ static void clocksource_enqueue(struct clocksource *cs)
                      | |  |         |      | |
                      | |  +---------+      | |
                      | |                   | |
-                     | |     PIT           | |
+//                   | |     PIT           | |
                      | +->+---------+<<------+
                      |    |         |      |
                      +------.next   |      |
