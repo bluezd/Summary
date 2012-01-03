@@ -67,7 +67,7 @@ int raw_notifier_chain_register(struct raw_notifier_head *nh,
 static int notifier_chain_register(struct notifier_block **nl,
                 struct notifier_block *n)
 {               
-        此时 *nl = NULL
+        // 此时 *nl = NULL
 
         while ((*nl) != NULL) {
                 if (n->priority > (*nl)->priority)
@@ -79,7 +79,7 @@ static int notifier_chain_register(struct notifier_block **nl,
 
         rcu_assign_pointer(*nl, n);
         *nl = n;
-        clockevents_chain->head = &tick_notifier;
+        // clockevents_chain->head = &tick_notifier;
 
         return 0;
 }
@@ -1019,11 +1019,13 @@ int __init hpet_enable(void)
                 return 0;
                 
         hpet_set_mapping();
+	// Maybe hpet as a PCI device 获得线性地址
 
         /*
          * Read the period and check for a sane value:
          */     
         hpet_period = hpet_readl(HPET_PERIOD);
+	// 周期
                 
         /*      
          * AMD SB700 based systems with spread spectrum enabled use a
@@ -1082,6 +1084,15 @@ out_nohpet:
         hpet_address = 0;
         return 0;
 }
+
+/* Max HPET Period is 10^8 femto sec as in HPET spec */
+#define HPET_MAX_PERIOD         100000000UL
+/*
+ *  * Min HPET period is 10^5 femto sec just for safety. If it is less than this,
+ *   * then 32 bit HPET counter wrapsaround in less than 0.5 sec.
+ *    */
+#define HPET_MIN_PERIOD         100000UL
+
 
 static int hpet_clocksource_register(void)
 {
@@ -1450,6 +1461,35 @@ static void hpet_legacy_clockevent_register(void)
 |       };                                                                           |
 +------------------------------------------------------------------------------------+
 
+/**
+ *  * cpumask_of - the cpumask containing just a given cpu
+ *   * @cpu: the cpu (<= nr_cpu_ids)
+ *    */
+#define cpumask_of(cpu) (get_cpu_mask(cpu))
+
+static inline const struct cpumask *get_cpu_mask(unsigned int cpu)
+{
+        const unsigned long *p = cpu_bit_bitmap[1 + cpu % BITS_PER_LONG];
+        p -= cpu / BITS_PER_LONG;
+        return to_cpumask(p);
+}
+
+const unsigned long cpu_bit_bitmap[BITS_PER_LONG+1][BITS_TO_LONGS(NR_CPUS)] = {
+
+        MASK_DECLARE_8(0),      MASK_DECLARE_8(8),
+        MASK_DECLARE_8(16),     MASK_DECLARE_8(24),
+#if BITS_PER_LONG > 32
+        MASK_DECLARE_8(32),     MASK_DECLARE_8(40),
+        MASK_DECLARE_8(48),     MASK_DECLARE_8(56),
+#endif
+};
+
+#define MASK_DECLARE_1(x)       [x+1][0] = 1UL << (x)
+#define MASK_DECLARE_2(x)       MASK_DECLARE_1(x), MASK_DECLARE_1(x+1)
+#define MASK_DECLARE_4(x)       MASK_DECLARE_2(x), MASK_DECLARE_2(x+2)
+#define MASK_DECLARE_8(x)       MASK_DECLARE_4(x), MASK_DECLARE_4(x+4)
+
+
 /*              
  * Initialize the conversion factor and the min/max deltas of the clock event
  * structure and register the clock event source with the framework.
@@ -1601,52 +1641,61 @@ static void __init init_tsc_clocksource(void)
 |                                                                         |
 +-------------------------------------------------------------------------+
 
-        # cat /proc/timer_list | more
-
-        Tick Device: mode:     1                      --> one-shot 单次 
-        Broadcast device
-        Clock Event Device: hpet
-         max_delta_ns:   149983013276
-         min_delta_ns:   13409
-         mult:           61496111
-         shift:          32
-         mode:           3
-         next_event:     21524167000000 nsecs
-         set_next_event: hpet_legacy_next_event
-         set_mode:       hpet_legacy_set_mode
-         event_handler:  tick_handle_oneshot_broadcast
-         retries:        1459862
-        tick_broadcast_mask: 00000001
-        tick_broadcast_oneshot_mask: 00000002
 
 
-        Tick Device: mode:     1
-        Per CPU device: 0
-        Clock Event Device: lapic
-         max_delta_ns:   128824925406
-         min_delta_ns:   1000
-         mult:           71596176
-         shift:          32
-         mode:           3
-         next_event:     21524167000000 nsecs
-         set_next_event: lapic_next_event
-         set_mode:       lapic_timer_setup
-         event_handler:  hrtimer_interrupt
-         retries:        891537
 
-        Tick Device: mode:     1
-        Per CPU device: 1
-        Clock Event Device: lapic
-         max_delta_ns:   128824925406
-         min_delta_ns:   1000
-         mult:           71596176
-         shift:          32
-         mode:           1
-         next_event:     21524167000000 nsecs
-         set_next_event: lapic_next_event
-         set_mode:       lapic_timer_setup
-         event_handler:  hrtimer_interrupt
-         retries:        539190
+
+
+
+   +-------------------------------------------------------------------------+
+   |                                                                         |
+   |    # cat /proc/timer_list | more                                        |
+   |                                                                         |
+   |    Tick Device: mode:     1                      --> one-shot 单次      |
+   |    Broadcast device                                                     |
+   |    Clock Event Device: hpet                                             |
+   |     max_delta_ns:   149983013276                                        |
+   |     min_delta_ns:   13409                                               |
+   |     mult:           61496111                                            |
+   |     shift:          32                                                  |
+   |     mode:           3                                                   |
+   |     next_event:     21524167000000 nsecs                                |
+   |     set_next_event: hpet_legacy_next_event                              |
+   |     set_mode:       hpet_legacy_set_mode                                |
+   |     event_handler:  tick_handle_oneshot_broadcast                       |
+   |     retries:        1459862                                             |
+   |    tick_broadcast_mask: 00000001                                        |
+   |    tick_broadcast_oneshot_mask: 00000002                                |
+   |                                                                         |
+   |                                                                         |
+   |    Tick Device: mode:     1                                             |
+   |    Per CPU device: 0                                                    |
+   |    Clock Event Device: lapic                                            |
+   |     max_delta_ns:   128824925406                                        |
+   |     min_delta_ns:   1000                                                |
+   |     mult:           71596176                                            |
+   |     shift:          32                                                  |
+   |     mode:           3                                                   |
+   |     next_event:     21524167000000 nsecs                                |
+   |     set_next_event: lapic_next_event                                    |
+   |     set_mode:       lapic_timer_setup                                   |
+   |     event_handler:  hrtimer_interrupt                                   |
+   |     retries:        891537                                              |
+   |                                                                         |
+   |    Tick Device: mode:     1                                             |
+   |    Per CPU device: 1                                                    |
+   |    Clock Event Device: lapic                                            |
+   |     max_delta_ns:   128824925406                                        |
+   |     min_delta_ns:   1000                                                |
+   |     mult:           71596176                                            |
+   |     shift:          32                                                  |
+   |     mode:           1                                                   |
+   |     next_event:     21524167000000 nsecs                                |
+   |     set_next_event: lapic_next_event                                    |
+   |     set_mode:       lapic_timer_setup                                   |
+   |     event_handler:  hrtimer_interrupt                                   |
+   |     retries:        539190                                              |
+   +-------------------------------------------------------------------------+
 
 clock event device 有三种 PIT HPET APIC
                           PIT/HPET Global clock event device
@@ -1722,19 +1771,23 @@ enum clock_event_nofitiers {
  */
 static void clockevents_do_notify(unsigned long reason, void *dev)
 {
+	// dev 为时钟事件设备 (hpet) 
         raw_notifier_call_chain(&clockevents_chain, reason, dev);
 }
 
+// clockevents_chain 已经在 tick_init 函数中初始化
+// clockevents_chain->head = &tick_notifier
 
-/* Notification for clock events */
-static RAW_NOTIFIER_HEAD(clockevents_chain);
+struct raw_notifier_head {
+	        struct notifier_block *head;
+};
 
-#define RAW_NOTIFIER_HEAD(name)                                 \
-        struct raw_notifier_head name =                         \
-	                RAW_NOTIFIER_INIT(name)
+int raw_notifier_call_chain(struct raw_notifier_head *nh,
+		                unsigned long val, void *v)
+{
+	        return __raw_notifier_call_chain(nh, val, v, -1, NULL);
+}
 
-#define RAW_NOTIFIER_INIT(name) {                               \
-                .head = NULL }
 
 
 /**     
@@ -1762,13 +1815,7 @@ int __raw_notifier_call_chain(struct raw_notifier_head *nh,
 {
         return notifier_call_chain(&nh->head, val, v, nr_to_call, nr_calls);
 }
-EXPORT_SYMBOL_GPL(__raw_notifier_call_chain);
 
-int raw_notifier_call_chain(struct raw_notifier_head *nh,
-                unsigned long val, void *v)
-{
-        return __raw_notifier_call_chain(nh, val, v, -1, NULL);
-}
 
 /**
  * notifier_call_chain - Informs the registered notifiers about an event.
@@ -1790,10 +1837,10 @@ static int __kprobes notifier_call_chain(struct notifier_block **nl,
         struct notifier_block *nb, *next_nb;
 
         nb = rcu_dereference(*nl);
-        nb 指向 notifier_block
+        // nb 指向 notifier_block
 
         while (nb && nr_to_call) {
-                nr_to_call = -1
+                // nr_to_call = -1
 
                 next_nb = rcu_dereference(nb->next);
 
@@ -1805,7 +1852,7 @@ static int __kprobes notifier_call_chain(struct notifier_block **nl,
                 }
 #endif
                 ret = nb->notifier_call(nb, val, v);
-                调用 tick_notify 函数 val = CLOCK_EVT_NOTIFY_ADD 
+                // 调用 tick_notify 函数 val = CLOCK_EVT_NOTIFY_ADD 
 
                 if (nr_calls)
                         (*nr_calls)++;
@@ -1828,6 +1875,7 @@ static int tick_notify(struct notifier_block *nb, unsigned long reason,
 
         case CLOCK_EVT_NOTIFY_ADD:
                 return tick_check_new_device(dev);
+		// 这里
 
         case CLOCK_EVT_NOTIFY_BROADCAST_ON:
         case CLOCK_EVT_NOTIFY_BROADCAST_OFF:
@@ -1871,7 +1919,7 @@ static int tick_notify(struct notifier_block *nb, unsigned long reason,
  */             
 static int tick_check_new_device(struct clock_event_device *newdev)
 {       
-        newdev = &hpet_clockevent;
+        // newdev = &hpet_clockevent;
 
         struct clock_event_device *curdev;
         struct tick_device *td;
@@ -1883,9 +1931,10 @@ static int tick_check_new_device(struct clock_event_device *newdev)
         cpu = smp_processor_id();
         if (!cpumask_test_cpu(cpu, newdev->cpumask))
                 goto out_bc;
+	// cpumask:            cpumask to indicate for which CPUs this device works
                 
         td = &per_cpu(tick_cpu_device, cpu);
-        tick_cpu_device 是一个各CPU链表，包含了系统中每个CPU对应的struct tick_device 实例.
+        // tick_cpu_device 是一个各CPU链表，包含了系统中每个CPU对应的struct tick_device 实例.
 
         curdev = td->evtdev;
         curdev = NULL;
@@ -1954,6 +2003,17 @@ out_bc:
 
         return ret;
 }
+
+/**
+ *  * cpumask_test_cpu - test for a cpu in a cpumask
+ *   * @cpu: cpu number (< nr_cpu_ids)
+ *    * @cpumask: the cpumask pointer
+ *     *
+ *      * No static inline type checking - see Subtlety (1) above.
+ *       */
+#define cpumask_test_cpu(cpu, cpumask) \
+	        test_bit(cpumask_check(cpu), cpumask_bits((cpumask)))
+
 
 /**
  * clockevents_exchange_device - release and request clock devices
