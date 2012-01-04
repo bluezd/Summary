@@ -540,6 +540,9 @@ void do_gettimeofday(struct timeval *tv)
 	// now.tv_nsec 不足一秒的纳秒数 转换为微妙数.
 }       
 
+CONFIG_GENERIC_TIME=y
+// rhel6
+
 struct timeval {
         __kernel_time_t         tv_sec;         /* seconds */
         __kernel_suseconds_t    tv_usec;        /* microseconds */
@@ -568,6 +571,7 @@ void getnstimeofday(struct timespec *ts)
                 nsecs += arch_gettimeoffset(); // NULL function ?
 
         } while (read_seqretry(&xtime_lock, seq));
+	// 顺序锁，判断是否重读. 因为此时可能某个进程写时钟源.这样读出来的值就不准确需要重读.
 
         timespec_add_ns(ts, nsecs);
         // add nsecs 到 struct timespec 结构.
@@ -577,6 +581,66 @@ truct timespec {
         time_t  tv_sec;         /* seconds */
         long    tv_nsec;        /* nanoseconds */
 };
+
+struct timespec xtime __attribute__ ((aligned (16))); 
+
+/*                                                                                      
+ * This read-write spinlock protects us from races in SMP while                         
+ * playing with xtime.                                                                  
+ */                                                                                     
+__cacheline_aligned_in_smp DEFINE_SEQLOCK(xtime_lock);                   
+
+#define DEFINE_SEQLOCK(x) \
+                seqlock_t x = __SEQLOCK_UNLOCKED(x)                                     
+
+typedef struct {                                                                        
+        unsigned sequence;                                                    
+        spinlock_t lock;                                                                
+} seqlock_t;
+
+// 记录了写着进程访问临界资源的过程 初始化为 0 写时 +1,解除写锁时再 +1 ,该直为奇数时处于写>锁定状态                    
+// 读直接访问不需要加锁
+
+#define __SEQLOCK_UNLOCKED(lockname) \
+                 { 0, __SPIN_LOCK_UNLOCKED(lockname) }
+
+# define __SPIN_LOCK_UNLOCKED(lockname) \
+        (spinlock_t)    {       .raw_lock = __RAW_SPIN_LOCK_UNLOCKED,   \
+                                SPIN_DEP_MAP_INIT(lockname) }
+
+
+/* Start of read calculation -- fetch last complete writer token */
+static __always_inline unsigned read_seqbegin(const seqlock_t *sl)
+{
+        unsigned ret;
+
+repeat:
+        ret = sl->sequence;
+        smp_rmb();
+        if (unlikely(ret & 1)) {
+                cpu_relax();
+                goto repeat;
+        }
+
+        return ret;
+}
+
+
+/*              
+ * Test if reader processed invalid data.
+ *
+ * If sequence value changed then writer changed data while in section.
+ */             
+static __always_inline int read_seqretry(const seqlock_t *sl, unsigned start)
+{      
+	// 假设 start = 0
+        smp_rmb();
+        
+        return (sl->sequence != start);
+}       
+
+
+
 
 /* Timekeeper helper functions. */
 static inline s64 timekeeping_get_ns(void)
