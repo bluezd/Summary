@@ -563,8 +563,11 @@ void getnstimeofday(struct timespec *ts)
 
         do {
                 seq = read_seqbegin(&xtime_lock);
+		// 加读锁，如果此时已经加上的写锁，则自旋
 
                 *ts = xtime;
+		// 此时很有可能更新 xtime.(时钟中断处理程序)
+		
                 nsecs = timekeeping_get_ns();
 
                 /* If arch requires, add in gettimeoffset() */
@@ -576,6 +579,16 @@ void getnstimeofday(struct timespec *ts)
         timespec_add_ns(ts, nsecs);
         // add nsecs 到 struct timespec 结构.
 }
+
+ +--------------------------------------------------------------------------------------------------------------------+
+ |                                                                                                                    |
+ |无非三种情况:                                                                                                       |
+ |  1 循环只执行一遍，准确获得当前时间                                                                                |
+ |  2 顺利加上读锁，但是与此同时时钟中断到来需要更新xtime,加上写锁(有更高的优先级)，让后 read_seqretry 返回 1 表示时间|      已经不准却需要重新计算。在再次循环读取。
+ |  3 读锁阻塞，因为此时已经加上了写锁(更新 xtime),等到写锁释放后便可读取.                                            |
+ |                                                                                                                    |
+ +--------------------------------------------------------------------------------------------------------------------+
+
 
 truct timespec {
         time_t  tv_sec;         /* seconds */
@@ -653,10 +666,11 @@ static inline s64 timekeeping_get_ns(void)
         // 时钟源 PIT/HPET/TSC
 
         cycle_now = clock->read(clock);
-        // 读取时钟周期的当前计数值
+        // 读取时钟周期的当前计数值 假设为 TSC --> read_tsc()
 
         /* calculate the delta since the last update_wall_time: */
         cycle_delta = (cycle_now - clock->cycle_last) & clock->mask;
+	// clock->cycle_last 应该由时钟中断处理程序负责更新.
 
         /* return delta convert to nanoseconds using ntp adjusted mult. */
         return clocksource_cyc2ns(cycle_delta, timekeeper.mult,
@@ -745,6 +759,11 @@ __iter_div_u64_rem(u64 dividend, u32 divisor, u64 *remainder)
 
         return ret;
 }
+
+ +-------------------+
+ |gettimeofday over! |
+ +-------------------+
+
 
 void __init init_timer_stats(void)
 {                                    
