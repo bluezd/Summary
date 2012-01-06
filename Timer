@@ -1528,6 +1528,9 @@ static void hpet_legacy_clockevent_register(void)
         printk(KERN_DEBUG "hpet clockevent registered\n");
 }
 
+#define FSEC_PER_NSEC                   1000000L
+
+
 +------------------------------------------------------------------------------------+
 |                                                                                    |
 |       /*                                                                           |
