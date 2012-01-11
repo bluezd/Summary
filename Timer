@@ -876,6 +876,38 @@ void __init timekeeping_init(void)
 }
 
 
+
+static cycle_t jiffies_read(struct clocksource *cs)
+{
+	return (cycle_t) jiffies;
+}
+
+struct clocksource clocksource_jiffies = {
+	.name		= "jiffies",
+	.rating		= 1, /* lowest valid rating*/
+	.read		= jiffies_read,
+	.mask		= 0xffffffff, /*32bits*/
+	.mult		= NSEC_PER_JIFFY << JIFFIES_SHIFT, /* details above */
+	.shift		= JIFFIES_SHIFT,
+};
+
+#define NSEC_PER_JIFFY	((u32)((((u64)NSEC_PER_SEC)<<8)/ACTHZ))
+
+#define ACTHZ (SH_DIV (CLOCK_TICK_RATE, LATCH, 8))
+
+#define CLOCK_TICK_RATE		PIT_TICK_RATE
+#define PIT_TICK_RATE 1193182ul
+#define LATCH  ((CLOCK_TICK_RATE + HZ/2) / HZ)	/* For divider */
+
+
+#define SH_DIV(NOM,DEN,LSH) (   (((NOM) / (DEN)) << (LSH))              \
+                             + ((((NOM) % (DEN)) << (LSH)) + (DEN) / 2) / (DEN))
+
+HZ=1000
+
+#define NSEC_PER_SEC	1000000000L
+
+
 /**
  *  * read_boot_clock -  Return time of the system start.
  *   *
@@ -1456,7 +1488,7 @@ static int change_clocksource(void *data)
 
                 old = timekeeper.clock;
                 timekeeper_setup_internals(new);
-		// 设置新的时钟源 tsc
+		// 设置新的时钟源 tsc --> timekeeper.
 
                 if (old->disable)
                         old->disable(old);
@@ -1479,17 +1511,28 @@ static void timekeeping_forward_now(void)
         s64 nsec;
 
         clock = timekeeper.clock;
+	// clock = &clocksource_jiffies 
+	
         cycle_now = clock->read(clock);
+	// 返回 jiffies
+	
         cycle_delta = (cycle_now - clock->cycle_last) & clock->mask;
+	// 经过的时间(jiffies 数)
+
         clock->cycle_last = cycle_now;
         
         nsec = clocksource_cyc2ns(cycle_delta, timekeeper.mult,
                                   timekeeper.shift);
+	// 转换成 纳秒
+	//  timekeeper.mult =  
+	//  timekeeper.shift = 8 
         
         /* If arch requires, add in gettimeoffset() */
         nsec += arch_gettimeoffset();
+	// 空函数
 
         timespec_add_ns(&xtime, nsec);
+	// 加到 xtime 中去 
 
         nsec = clocksource_cyc2ns(cycle_delta, clock->mult, clock->shift);
         timespec_add_ns(&raw_time, nsec);
@@ -1528,7 +1571,7 @@ static void hpet_legacy_clockevent_register(void)
         printk(KERN_DEBUG "hpet clockevent registered\n");
 }
 
-#define FSEC_PER_NSEC                   1000000L
+#define FSEC_PER_NSEC                   1000000L   // 飞秒   1 纳秒 = 1000000 飞秒
 
 
 +------------------------------------------------------------------------------------+
@@ -1547,10 +1590,85 @@ static void hpet_legacy_clockevent_register(void)
 |       };                                                                           |
 +------------------------------------------------------------------------------------+
 
-/**
- *  * cpumask_of - the cpumask containing just a given cpu
- *   * @cpu: the cpu (<= nr_cpu_ids)
- *    */
+ +----------------------------------------------------------------------------------------------+
+ |                                                                                              |
+ |      /**                                                                                     |
+ |       * struct clock_event_device - clock event device descriptor                            |
+ |       * @name:               ptr to clock event name                                         |
+ |       * @features:           features                                                        |
+ |       * @max_delta_ns:       maximum delta value in ns                                       |
+ |       * @min_delta_ns:       minimum delta value in ns                                       |
+ |       * @mult:               nanosecond to cycles multiplier                                 |
+ |       * @shift:              nanoseconds to cycles divisor (power of two)                    |
+ |       * @rating:             variable to rate clock event devices                            |
+ |       * @irq:                IRQ number (only for non CPU local devices)                     |
+ |       * @cpumask:            cpumask to indicate for which CPUs this device works            |
+ |       * @set_next_event:     set next event function                                         |
+ |       * @set_mode:           set mode function                                               |
+ |       * @event_handler:      Assigned by the framework to be called by the low               |
+ |       *                      level handler of the event source                               |
+ |       * @broadcast:          function to broadcast events                                    |
+ |       * @list:               list head for the management code                               |
+ |       * @mode:               operating mode assigned by the management code                  |
+ |       * @next_event:         local storage for the next event in oneshot mode                |
+ |       */                                                                                     |
+ |      struct clock_event_device {                                                             |
+ |      	const char              *name;                                                  |
+ |      	unsigned int            features;                                               |
+ |      	unsigned long           max_delta_ns;                                           |
+ |      	unsigned long           min_delta_ns;                                           |
+ |      	unsigned long           mult;                                                   |
+ |      	int                     shift;                                                  |
+ |      	int                     rating;                                                 |
+ |      	int                     irq;                                                    |
+ |      	const struct cpumask    *cpumask;                                               |
+ |      	int                     (*set_next_event)(unsigned long evt,                    |
+ |      						  struct clock_event_device *);         |
+ |      	void                    (*set_mode)(enum clock_event_mode mode,                 |
+ |      					    struct clock_event_device *);               |
+ |      	void                    (*event_handler)(struct clock_event_device *);          |
+ |      	void                    (*broadcast)(const struct cpumask *mask);               |
+ |      	struct list_head        list;                                                   |
+ |      	enum clock_event_mode   mode;                                                   |
+ |      	ktime_t                 next_event;                                             |
+ |      };                                                                                      |
+ |                                                                                              |
+ +----------------------------------------------------------------------------------------------+
+
+typedef struct cpumask { DECLARE_BITMAP(bits, NR_CPUS); } cpumask_t;
+
+
+#define DECLARE_BITMAP(name,bits) \
+	unsigned long name[BITS_TO_LONGS(bits)]
+
+#define BITS_TO_LONGS(nr)	DIV_ROUND_UP(nr, BITS_PER_BYTE * sizeof(long))
+
+#define DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
+
+/*
+ * Calculate a multiplication factor for scaled math, which is used to convert
+ * nanoseconds based values to clock ticks:
+ *
+ * clock_ticks = (nanoseconds * factor) >> shift.
+ *
+ * div_sc is the rearranged equation to calculate a factor from a given clock
+ * ticks / nanoseconds ratio:
+ *
+ * factor = (clock_ticks << shift) / nanoseconds
+ */
+static inline unsigned long div_sc(unsigned long ticks, unsigned long nsec,
+                                   int shift)
+{
+        // ticks = 1000000L
+        // nsec = hpet_period
+        // shift = 32
+        uint64_t tmp = ((uint64_t)ticks) << shift;
+
+        do_div(tmp, nsec);
+        return (unsigned long) tmp;
+}
+
+
 #define cpumask_of(cpu) (get_cpu_mask(cpu))
 
 static inline const struct cpumask *get_cpu_mask(unsigned int cpu)
@@ -1574,6 +1692,22 @@ const unsigned long cpu_bit_bitmap[BITS_PER_LONG+1][BITS_TO_LONGS(NR_CPUS)] = {
 #define MASK_DECLARE_2(x)       MASK_DECLARE_1(x), MASK_DECLARE_1(x+1)
 #define MASK_DECLARE_4(x)       MASK_DECLARE_2(x), MASK_DECLARE_2(x+2)
 #define MASK_DECLARE_8(x)       MASK_DECLARE_4(x), MASK_DECLARE_4(x+4)
+
+
+/**
+ * to_cpumask - convert an NR_CPUS bitmap to a struct cpumask *
+ * @bitmap: the bitmap
+ *
+ * There are a few places where cpumask_var_t isn't appropriate and
+ * static cpumasks must be used (eg. very early boot), yet we don't
+ * expose the definition of 'struct cpumask'.
+ *
+ * This does the conversion, and can be used as a constant initializer.
+ */
+#define to_cpumask(bitmap)                                              \
+        ((struct cpumask *)(1 ? (bitmap)                                \
+                            : (void *)sizeof(__check_is_bitmap(bitmap))))
+
 
 
 /*              
