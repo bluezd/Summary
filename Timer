@@ -1568,6 +1568,7 @@ static void hpet_legacy_clockevent_register(void)
         hpet_clockevent.cpumask = cpumask_of(smp_processor_id());
         clockevents_register_device(&hpet_clockevent);
         global_clock_event = &hpet_clockevent;
+	// Global clock event
         printk(KERN_DEBUG "hpet clockevent registered\n");
 }
 
@@ -2208,6 +2209,7 @@ static int tick_check_new_device(struct clock_event_device *newdev)
         tick_setup_device(td, newdev, cpu, cpumask_of(cpu));
         if (newdev->features & CLOCK_EVT_FEAT_ONESHOT)
                 tick_oneshot_notify();
+	        // here
 
         spin_unlock_irqrestore(&tick_device_lock, flags);
         return NOTIFY_STOP;
@@ -2293,20 +2295,20 @@ static void tick_setup_device(struct tick_device *td,
          * First device setup ?
          */
         if (!td->evtdev) {
-        此时钟设备没有相关的时钟事件设备
+        // 此时钟设备没有相关的时钟事件设备
                 /*
                  * If no cpu took the do_timer update, assign it to
                  * this cpu:
                  */
                 if (tick_do_timer_cpu == TICK_DO_TIMER_BOOT) {
-                        如果没有选定时钟设备来承担全局时钟设备的角色，那么将选择当前设备来承担此职责
+                        // 如果没有选定时钟设备来承担全局时钟设备的角色，那么将选择当前设备来承担此职责
 
                         tick_do_timer_cpu = cpu;
-                        设置为当前设备所属处理器编号
+                        // 设置为当前设备所属处理器编号
                         tick_next_period = ktime_get();
 
                         tick_period = ktime_set(0, NSEC_PER_SEC / HZ);
-                        时钟周期，纳秒
+                        // 时钟周期，纳秒
                         HZ = 1000
                 }
 
@@ -2314,7 +2316,7 @@ static void tick_setup_device(struct tick_device *td,
                  * Startup in periodic mode first.
                  */
                 td->mode = TICKDEV_MODE_PERIODIC;
-                设备运行模式 --> 周期模式
+                // 设备运行模式 --> 周期模式
 
         } else {
                 handler = td->evtdev->event_handler;
@@ -2323,7 +2325,7 @@ static void tick_setup_device(struct tick_device *td,
         }
 
         td->evtdev = newdev;
-        为时钟设备指定事件设备
+        //为时钟设备指定事件设备
 
         /*
          * When the device is not per cpu, pin the interrupt to the
@@ -2343,6 +2345,7 @@ static void tick_setup_device(struct tick_device *td,
 
         if (td->mode == TICKDEV_MODE_PERIODIC)
                 tick_setup_periodic(newdev, 0);
+	        // invoke this ......
         else
                 tick_setup_oneshot(newdev, handler, next_event);
 }
@@ -2394,6 +2397,7 @@ int tick_device_uses_broadcast(struct clock_event_device *dev, int cpu)
 void tick_setup_periodic(struct clock_event_device *dev, int broadcast)
 {
         tick_set_periodic_handler(dev, broadcast);
+	// broadcast = 0
 
         /* Broadcast setup ? */
         if (!tick_device_is_functional(dev))
@@ -2402,6 +2406,7 @@ void tick_setup_periodic(struct clock_event_device *dev, int broadcast)
         if ((dev->features & CLOCK_EVT_FEAT_PERIODIC) &&
             !tick_broadcast_oneshot_active()) {
                 clockevents_set_mode(dev, CLOCK_EVT_MODE_PERIODIC);
+		// here
         } else {
                 unsigned long seq;
                 ktime_t next;
@@ -2428,6 +2433,7 @@ void tick_set_periodic_handler(struct clock_event_device *dev, int broadcast)
 {
         if (!broadcast)
                 dev->event_handler = tick_handle_periodic;
+	        // here
         else
                 dev->event_handler = tick_handle_periodic_broadcast;
 }               
