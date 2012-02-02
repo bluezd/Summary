@@ -2537,3 +2537,29 @@ smp_apic_timer_interrupt()
 	--> local_apic_timer_interrupt()
 	            evt->event_handler(evt);  --> hrtimer_interrupt() 
 
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------
+start_secondary()
+{
+	x86_cpuinit.setup_percpu_clockev();
+	// invoke setup_secondary_APIC_clock 
+}
+  
+ +--------------------------------------------------------------------------------------+
+ |      struct x86_cpuinit_ops x86_cpuinit __cpuinitdata = {                            |
+ |      		.setup_percpu_clockev           = setup_secondary_APIC_clock,   |
+ |      };                                                                              |
+ |                                                                                      |
+ +--------------------------------------------------------------------------------------+
+
+void __cpuinit setup_secondary_APIC_clock(void)
+{
+	        setup_APIC_timer();
+		// 注册时钟事件设备
+}
+
+[Switching to Thread 3]
+
+ wakeup_secondary_cpu_via_init
+     --> startup_ipi_hook 
