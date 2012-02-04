@@ -2584,7 +2584,8 @@ kernel_init()
 	                        --> wakeup_secondary_cpu_via_init()
 				      --> startup_ipi_hook()
 	                                  ......
-					  maybe start_secondary() new thread ?
+                                          maybe 
+					  start_secondary()
 	                                          --> setup_secondary_APIC_clock()
 	                                                --> setup_APIC_timer()
 
@@ -2625,17 +2626,6 @@ native_smp_prepare_cpus()
 
 #define for_each_possible_cpu(cpu) for_each_cpu((cpu), cpu_possible_mask)
 
-/**
- * for_each_cpu - iterate over every cpu in a mask
- * @cpu: the (optionally unsigned) integer iterator
- * @mask: the cpumask pointer
- *
- * After the loop, cpu is >= nr_cpu_ids.
- */
-#define for_each_cpu(cpu, mask)                         \
-        for ((cpu) = -1;                                \
-                (cpu) = cpumask_next((cpu), (mask)),    \
-                (cpu) < nr_cpu_ids;)
 
 num_processors = 4   // 初始值为 0
 nr_cpu_ids=4
@@ -2643,27 +2633,13 @@ disabled_cpus
 total_cpus
 possible
 
-/**
- * cpumask_next - get the next cpu in a cpumask
- * @n: the cpu prior to the place to search (ie. return will be > @n)
- * @srcp: the cpumask pointer
- *
- * Returns >= nr_cpu_ids if no further cpus set.
- */
-static inline unsigned int cpumask_next(int n, const struct cpumask *srcp)
-{
-        /* -1 is a legal arg here. */
-        if (n != -1)
-                cpumask_check(n);
-        return find_next_bit(cpumask_bits(srcp), nr_cpumask_bits, n+1);
-}
-
+// ensure num_processors
 setup_arch()
-
 acpi_boot_init()
   --> acpi_process_madt()
 	--> acpi_parse_madt_lapic_entries() 
 
+// ensure nr_cpu_ids
 __init void prefill_possible_map(void)
 {
         int i, possible;
@@ -2698,9 +2674,63 @@ __init void prefill_possible_map(void)
 
 
 
+/* Called by boot processor to activate the rest. */
+static void __init smp_init(void)
+{
+        unsigned int cpu;
+
+        /* FIXME: This should be done in userspace --RR */
+        for_each_present_cpu(cpu) {
+                if (num_online_cpus() >= setup_max_cpus)
+                        break;
+                if (!cpu_online(cpu))
+                        cpu_up(cpu);
+                        // 根据 nr_cpu_ids 循环 up CPU (4 个 CPU up 其他 3 个)
+        }
+
+        /* Any cleanup work */
+        printk(KERN_INFO "Brought up %ld CPUs\n", (long)num_online_cpus());
+        smp_cpus_done(setup_max_cpus);
+
+        printk(KERN_DEBUG "sizeof(vma)=%u bytes\n", (unsigned int) sizeof(struct vm_area_struct));
+        printk(KERN_DEBUG "sizeof(page)=%u bytes\n", (unsigned int) sizeof(struct page));
+        printk(KERN_DEBUG "sizeof(inode)=%u bytes\n", (unsigned int) sizeof(struct inode));
+        printk(KERN_DEBUG "sizeof(dentry)=%u bytes\n", (unsigned int) sizeof(struct dentry));
+        printk(KERN_DEBUG "sizeof(ext3inode)=%u bytes\n", (unsigned int) sizeof(struct ext3_inode_info));
+        printk(KERN_DEBUG "sizeof(buffer_head)=%u bytes\n", (unsigned int) sizeof(struct buffer_head));
+        printk(KERN_DEBUG "sizeof(skbuff)=%u bytes\n", (unsigned int) sizeof(struct sk_buff));
+        printk(KERN_DEBUG "sizeof(task_struct)=%u bytes\n", (unsigned int) sizeof(struct task_struct));
+}
+
+#define for_each_present_cpu(cpu)  for_each_cpu((cpu), cpu_present_mask)
+
+#define cpu_online(cpu)		cpumask_test_cpu((cpu), cpu_online_mask)
+
+/**
+ * for_each_cpu - iterate over every cpu in a mask
+ * @cpu: the (optionally unsigned) integer iterator
+ * @mask: the cpumask pointer
+ *
+ * After the loop, cpu is >= nr_cpu_ids.
+ */
+#define for_each_cpu(cpu, mask)                         \
+        for ((cpu) = -1;                                \
+                (cpu) = cpumask_next((cpu), (mask)),    \
+                (cpu) < nr_cpu_ids;)
 
 
-
-
-
+/**
+ * cpumask_next - get the next cpu in a cpumask
+ * @n: the cpu prior to the place to search (ie. return will be > @n)
+ * @srcp: the cpumask pointer
+ *
+ * Returns >= nr_cpu_ids if no further cpus set.
+ */
+static inline unsigned int cpumask_next(int n, const struct cpumask *srcp)
+{
+        /* -1 is a legal arg here. */
+        if (n != -1)
+                cpumask_check(n);
+        return find_next_bit(cpumask_bits(srcp), nr_cpumask_bits, n+1);
+}
 
