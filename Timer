@@ -2589,7 +2589,61 @@ kernel_init()
 	                                          --> setup_secondary_APIC_clock()
 	                                                --> setup_APIC_timer()
 
+
+static inline void startup_ipi_hook(int phys_apicid, unsigned long start_eip,
+                                    unsigned long start_esp)
+{
+        PVOP_VCALL3(pv_apic_ops.startup_ipi_hook,
+                    phys_apicid, start_eip, start_esp);
+}
+
+
+#define PVOP_VCALL3(op, arg1, arg2, arg3)				\
+	__PVOP_VCALL(op, "", "", PVOP_CALL_ARG1(arg1),			\
+		     PVOP_CALL_ARG2(arg2), PVOP_CALL_ARG3(arg3))
 		    
+
+#define PVOP_CALL_ARG1(x)		"D" ((unsigned long)(x))
+#define PVOP_CALL_ARG2(x)		"S" ((unsigned long)(x))
+#define PVOP_CALL_ARG3(x)		"d" ((unsigned long)(x))
+
+
+#define __PVOP_VCALL(op, pre, post, ...)				\
+	____PVOP_VCALL(op, CLBR_ANY, PVOP_VCALL_CLOBBERS,		\
+		       VEXTRA_CLOBBERS,					\
+		       pre, post, ##__VA_ARGS__)
+
+
+#define CLBR_ANY  ((1 << 9) - 1)
+
+#define PVOP_VCALL_CLOBBERS	"=D" (__edi),				\
+				"=S" (__esi), "=d" (__edx),		\
+				"=c" (__ecx)
+
+#define VEXTRA_CLOBBERS	 , "rax", "r8", "r9", "r10", "r11"
+
+
+#define ____PVOP_VCALL(op, clbr, call_clbr, extra_clbr, pre, post, ...) \
+        ({                                                              \
+                PVOP_VCALL_ARGS;                                        \
+                PVOP_TEST_NULL(op);                                     \
+                asm volatile(pre                                        \
+                             paravirt_alt(PARAVIRT_CALL)                \
+                             post                                       \
+                             : call_clbr                                \
+                             : paravirt_type(op),                       \
+                               paravirt_clobber(clbr),                  \
+                               ##__VA_ARGS__                            \
+                             : "memory", "cc" extra_clbr);              \
+        })
+
+
+#define PVOP_VCALL_ARGS					\
+	unsigned long __edi = __edi, __esi = __esi,	\
+		__edx = __edx, __ecx = __ecx, __eax = __eax
+
+
+
   +-----------------------------------------------------------------------------+
   |                                                                             |
   |     struct smp_ops smp_ops = {                                              |
