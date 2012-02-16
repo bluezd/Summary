@@ -1,0 +1,122 @@
+I386 RHEL-5 timer --> gettimeofday
+
+asmlinkage long sys_gettimeofday(struct timeval __user *tv, struct timezone __user *tz)
+{
+        if (likely(tv != NULL)) {
+                struct timeval ktv;
+                do_gettimeofday(&ktv);
+                if (copy_to_user(tv, &ktv, sizeof(ktv)))
+                        return -EFAULT;
+        }
+        if (unlikely(tz != NULL)) {
+                if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
+                        return -EFAULT;
+        }
+        return 0;
+}
+
+#ifdef CONFIG_GENERIC_TIME
+
+/**
+ * do_gettimeofday - Returns the time of day in a timeval
+ * @tv:         pointer to the timeval to be set
+ *
+ * NOTE: Users should be converted to using get_realtime_clock_ts()
+ */
+void do_gettimeofday(struct timeval *tv)
+{
+        struct timespec now;
+
+        __get_realtime_clock_ts(&now);
+        tv->tv_sec = now.tv_sec;
+        tv->tv_usec = now.tv_nsec/1000;
+}
+
+/**
+ * __get_realtime_clock_ts - Returns the time of day in a timespec
+ * @ts:         pointer to the timespec to be set
+ *
+ * Returns the time of day in a timespec. Used by
+ * do_gettimeofday() and get_realtime_clock_ts().
+ */
+static inline void __get_realtime_clock_ts(struct timespec *ts)
+{
+        unsigned long seq;
+        s64 nsecs;
+
+        do {
+                seq = read_seqbegin(&xtime_lock);
+
+                *ts = xtime;
+                nsecs = __get_nsec_offset();
+
+        } while (read_seqretry(&xtime_lock, seq));
+
+        timespec_add_ns(ts, nsecs);
+}
+
+/**
+ * __get_nsec_offset - Returns nanoseconds since last call to periodic_hook
+ *
+ * private function, must hold xtime_lock lock when being
+ * called. Returns the number of nanoseconds since the
+ * last call to update_wall_time() (adjusted by NTP scaling)
+ */
+static inline s64 __get_nsec_offset(void)
+{
+        cycle_t cycle_now, cycle_delta;
+        s64 ns_offset;
+
+        /* read clocksource: */
+        cycle_now = clocksource_read(clock);
+
+        /* calculate the delta since the last update_wall_time: */
+        cycle_delta = (cycle_now - clock->cycle_last) & clock->mask;
+
+        /* convert to nanoseconds: */
+        ns_offset = cyc2ns(clock, cycle_delta);
+
+        return ns_offset;
+}
+
+/* Start of read calculation -- fetch last complete writer token */
+static __always_inline unsigned read_seqbegin(const seqlock_t *sl)
+{
+        unsigned ret = sl->sequence;
+        smp_rmb();
+        return ret;
+}
+
+/* Test if reader processed invalid data.
+ * If initial values is odd, 
+ *      then writer had already started when section was entered
+ * If sequence value changed
+ *      then writer changed data while in section
+ *      
+ * Using xor saves one conditional branch.
+ */
+static __always_inline int read_seqretry(const seqlock_t *sl, unsigned iv)
+{
+        smp_rmb();
+        return (iv & 1) | (sl->sequence ^ iv);
+}
+
+/**             
+ * timespec_add_ns - Adds nanoseconds to a timespec
+ * @a:          pointer to timespec to be incremented
+ * @ns:         unsigned nanoseconds value to be added
+ */     
+static inline void timespec_add_ns(struct timespec *a, u64 ns)
+{
+        ns += a->tv_nsec;
+        while(unlikely(ns >= NSEC_PER_SEC)) {
+                /* The following asm() prevents the compiler from
+                 * optimising this loop into a modulo operation.  */
+                asm("" : "+r"(ns));
+
+                ns -= NSEC_PER_SEC;
+                a->tv_sec++;
+        }
+        a->tv_nsec = ns;
+}       
+
