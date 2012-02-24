@@ -1539,6 +1539,48 @@ static void timekeeping_forward_now(void)
 }
 
 
+fs_initcall(hpet_late_init);
+
+/*
+ * Needs to be late, as the reserve_timer code calls kalloc !
+ *
+ * Not a problem on i386 as hpet_enable is called from late_time_init,
+ * but on x86_64 it is necessary !
+ */
+static __init int hpet_late_init(void)
+{
+        int cpu;
+
+        if (boot_hpet_disable)
+                return -ENODEV;
+
+        if (!hpet_address) {
+                if (!force_hpet_address)
+                        return -ENODEV;
+
+                hpet_address = force_hpet_address;
+                hpet_enable();
+        }
+
+        if (!hpet_virt_address)
+                return -ENODEV;
+
+        hpet_reserve_platform_timers(hpet_readl(HPET_ID));
+        hpet_print_config();
+
+        if (hpet_msi_disable)
+                return 0;
+
+        for_each_online_cpu(cpu) {
+                hpet_cpuhp_notify(NULL, CPU_ONLINE, (void *)(long)cpu);
+        }
+
+        /* This notifier should be called after workqueue is ready */
+        hotcpu_notifier(hpet_cpuhp_notify, -20);
+
+        return 0;
+}
+
 
 static void hpet_legacy_clockevent_register(void)
 {
