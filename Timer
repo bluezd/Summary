@@ -2814,6 +2814,7 @@ static void __init smp_init(void)
                 (cpu) = cpumask_next((cpu), (mask)),    \
                 (cpu) < nr_cpu_ids;)
 
+for (cpu = -1; cpu = cpumask_next(cpu,cpu_present_mask),cpu < 4;)
 
 /**
  * cpumask_next - get the next cpu in a cpumask
@@ -2824,9 +2825,24 @@ static void __init smp_init(void)
  */
 static inline unsigned int cpumask_next(int n, const struct cpumask *srcp)
 {
+	// srcp = cpu_present_mask
+	
         /* -1 is a legal arg here. */
         if (n != -1)
                 cpumask_check(n);
         return find_next_bit(cpumask_bits(srcp), nr_cpumask_bits, n+1);
 }
 
+typedef struct cpumask { DECLARE_BITMAP(bits, NR_CPUS); } cpumask_t;
+
+#define DECLARE_BITMAP(name,bits) \
+	unsigned long name[BITS_TO_LONGS(bits)]
+// unsigned long bits[4] | unsigned bits name[1]
+
+typedef struct cpumask {
+	unsigned long bits[4];
+} cpumask_t;
+
+#define cpumask_bits(maskp) ((maskp)->bits)
+
+#define nr_cpumask_bits	nr_cpu_ids
