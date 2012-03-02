@@ -2574,6 +2574,7 @@ void tick_broadcast_setup_oneshot(struct clock_event_device *bc)
 
 timer_interrupt() 时钟中断处理程序
 	--> global_clock_event->event_handler(global_clock_event); --> tick_handle_oneshot_broadcast
+	                                                           --> tick_handle_periodic()   CPU-0 经测试
 
 smp_apic_timer_interrupt()
 	--> local_apic_timer_interrupt()
