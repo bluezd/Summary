@@ -846,6 +846,8 @@ void __init timekeeping_init(void)
         struct timespec now, boot;
 
         read_persistent_clock(&now);
+	// 读取 RTC chip,get the UTC time
+	
         read_boot_clock(&boot);
 
         write_seqlock_irqsave(&xtime_lock, flags);
@@ -873,6 +875,22 @@ void __init timekeeping_init(void)
         total_sleep_time.tv_sec = 0;
         total_sleep_time.tv_nsec = 0;
         write_sequnlock_irqrestore(&xtime_lock, flags);
+}
+
+
+/* not static: needed by APM */
+void read_persistent_clock(struct timespec *ts)
+{
+        unsigned long retval, flags;
+
+        spin_lock_irqsave(&rtc_lock, flags);
+        retval = x86_platform.get_wallclock();
+        // invoke the mach_get_cmos_time()
+
+        spin_unlock_irqrestore(&rtc_lock, flags);
+
+        ts->tv_sec = retval;
+        ts->tv_nsec = 0;
 }
 
 
@@ -2338,6 +2356,7 @@ static void tick_setup_device(struct tick_device *td,
          */
         if (!td->evtdev) {
         // 此时钟设备没有相关的时钟事件设备
+	
                 /*
                  * If no cpu took the do_timer update, assign it to
                  * this cpu:
@@ -2575,6 +2594,39 @@ void tick_broadcast_setup_oneshot(struct clock_event_device *bc)
 timer_interrupt() 时钟中断处理程序
 	--> global_clock_event->event_handler(global_clock_event); --> tick_handle_oneshot_broadcast
 	                                                           --> tick_handle_periodic()   CPU-0 经测试
+								       --> tick_periodic()
+/*      
+ * Periodic tick
+ */     
+static void tick_periodic(int cpu)
+{       
+        if (tick_do_timer_cpu == cpu) {
+                write_seqlock(&xtime_lock);
+
+                /* Keep track of the next tick event */
+                tick_next_period = ktime_add(tick_next_period, tick_period);
+        
+                do_timer(1);
+                write_sequnlock(&xtime_lock);
+        }               
+
+        update_process_times(user_mode(get_irq_regs()));
+        profile_tick(CPU_PROFILING);
+}
+
+/*
+ * The 64-bit jiffies value is not atomic - you MUST NOT read it
+ * without sampling the sequence number in xtime_lock.
+ * jiffies is defined in the linker script...
+ */             
+
+void do_timer(unsigned long ticks)
+{               
+        jiffies_64 += ticks;
+        update_wall_time();
+        calc_global_load();
+}       
+
 
 smp_apic_timer_interrupt()
 	--> local_apic_timer_interrupt()
