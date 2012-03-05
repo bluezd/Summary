@@ -2401,14 +2401,16 @@ static void tick_setup_device(struct tick_device *td,
          * This allows us to handle this x86 misfeature in a generic
          * way.
          */
+	// check whether enable the broadcast mode,如果系统处于省电模式，而局部时钟停止工作，则会使用广播机制
         if (tick_device_uses_broadcast(newdev, cpu))
                 return;
 
         if (td->mode == TICKDEV_MODE_PERIODIC)
                 tick_setup_periodic(newdev, 0);
-	        // invoke this ......
+	        // 周期模式 invoke this ......
         else
                 tick_setup_oneshot(newdev, handler, next_event);
+	        // 单触发模式
 }
 
 #define NSEC_PER_SEC    1000000000L
@@ -2435,13 +2437,16 @@ int tick_device_uses_broadcast(struct clock_event_device *dev, int cpu)
                 cpumask_set_cpu(cpu, tick_get_broadcast_mask());
                 tick_broadcast_start_periodic(tick_broadcast_device.evtdev);
                 ret = 1;
-        } else {                             
+        } else {
+		// 正常情况下来到这里
+
                 /*
                  * When the new device is not affected by the stop
                  * feature and the cpu is marked in the broadcast mask
                  * then clear the broadcast bit.
                  */
                 if (!(dev->features & CLOCK_EVT_FEAT_C3STOP)) {
+			// Clockevent source stops in C3 State and needs broadcast support
                         int cpu = smp_processor_id();
         
                         cpumask_clear_cpu(cpu, tick_get_broadcast_mask());
@@ -2450,6 +2455,14 @@ int tick_device_uses_broadcast(struct clock_event_device *dev, int cpu)
         }
         spin_unlock_irqrestore(&tick_broadcast_lock, flags);
         return ret;
+}
+
+/*
+ * Check, if the device is functional or a dummy for broadcast
+ */
+static inline int tick_device_is_functional(struct clock_event_device *dev)
+{
+        return !(dev->features & CLOCK_EVT_FEAT_DUMMY);
 }
 
 /*
@@ -2468,6 +2481,7 @@ void tick_setup_periodic(struct clock_event_device *dev, int broadcast)
             !tick_broadcast_oneshot_active()) {
                 clockevents_set_mode(dev, CLOCK_EVT_MODE_PERIODIC);
 		// here
+		// 设置成周期模式
         } else {
                 unsigned long seq;
                 ktime_t next;
@@ -2498,6 +2512,104 @@ void tick_set_periodic_handler(struct clock_event_device *dev, int broadcast)
         else
                 dev->event_handler = tick_handle_periodic_broadcast;
 }               
+
+/**
+ * clockevents_set_mode - set the operating mode of a clock event device
+ * @dev:        device to modify
+ * @mode:       new mode
+ *      
+ * Must be called with interrupts disabled !
+ */             
+void clockevents_set_mode(struct clock_event_device *dev,
+                                 enum clock_event_mode mode)
+{               
+        if (dev->mode != mode) {
+                dev->set_mode(mode, dev);
+		// invoke the function hpet_legacy_semode = t_mode()
+
+                dev->mode = mode;
+                        
+                /*
+                 * A nsec2cyc multiplicator of 0 is invalid and we'd crash
+                 * on it, so fix it up and emit a warning:
+                 */
+                if (mode == CLOCK_EVT_MODE_ONESHOT) {
+                        if (unlikely(!dev->mult)) {
+                                dev->mult = 1;
+                                WARN_ON(1);
+                        }
+                }
+        }
+}
+
+static void hpet_legacy_set_mode(enum clock_event_mode mode,
+                        struct clock_event_device *evt)
+{
+        hpet_set_mode(mode, evt, 0);
+}
+
+static void hpet_set_mode(enum clock_event_mode mode,
+                          struct clock_event_device *evt, int timer)
+{
+        unsigned long cfg, cmp, now;
+        uint64_t delta;
+        
+	// mode = CLOCK_EVT_MODE_PERIODIC
+        switch (mode) {
+        case CLOCK_EVT_MODE_PERIODIC:
+                hpet_stop_counter();
+                delta = ((uint64_t)(NSEC_PER_SEC/HZ)) * evt->mult;
+                delta >>= evt->shift;
+                now = hpet_readl(HPET_COUNTER);
+                cmp = now + (unsigned long) delta;
+                cfg = hpet_readl(HPET_Tn_CFG(timer));
+                /* Make sure we use edge triggered interrupts */
+                cfg &= ~HPET_TN_LEVEL;
+                cfg |= HPET_TN_ENABLE | HPET_TN_PERIODIC |
+                       HPET_TN_SETVAL | HPET_TN_32BIT;
+                hpet_writel(cfg, HPET_Tn_CFG(timer));
+                hpet_writel(cmp, HPET_Tn_CMP(timer));
+                udelay(1);
+                /*
+                 * HPET on AMD 81xx needs a second write (with HPET_TN_SETVAL
+                 * cleared) to T0_CMP to set the period. The HPET_TN_SETVAL
+                 * bit is automatically cleared after the first write.
+                 * (See AMD-8111 HyperTransport I/O Hub Data Sheet,
+                 * Publication # 24674)
+                 */
+                hpet_writel((unsigned long) delta, HPET_Tn_CMP(timer));
+                hpet_start_counter();
+                hpet_print_config();
+                break;
+
+        case CLOCK_EVT_MODE_ONESHOT:
+                cfg = hpet_readl(HPET_Tn_CFG(timer));
+                cfg &= ~HPET_TN_PERIODIC;
+                cfg |= HPET_TN_ENABLE | HPET_TN_32BIT;
+                hpet_writel(cfg, HPET_Tn_CFG(timer));
+                break;
+
+        case CLOCK_EVT_MODE_UNUSED:
+        case CLOCK_EVT_MODE_SHUTDOWN:
+                cfg = hpet_readl(HPET_Tn_CFG(timer));
+                cfg &= ~HPET_TN_ENABLE;
+                hpet_writel(cfg, HPET_Tn_CFG(timer));
+                break;
+
+        case CLOCK_EVT_MODE_RESUME:
+                if (timer == 0) {
+                        hpet_enable_legacy_int();
+                } else {
+                        struct hpet_dev *hdev = EVT_TO_HPET_DEV(evt);
+                        hpet_setup_msi_irq(hdev->irq);
+                        disable_irq(hdev->irq);
+                        irq_set_affinity(hdev->irq, cpumask_of(hdev->cpu));
+                        enable_irq(hdev->irq);
+                }
+                hpet_print_config();
+                break;
+        }
+}
 
 
 run_timer_softirq()
@@ -2595,6 +2707,47 @@ timer_interrupt() 时钟中断处理程序
 	--> global_clock_event->event_handler(global_clock_event); --> tick_handle_oneshot_broadcast
 	                                                           --> tick_handle_periodic()   CPU-0 经测试
 								       --> tick_periodic()
+
+/*              
+ * Event handler for periodic ticks
+ */             
+void tick_handle_periodic(struct clock_event_device *dev)
+{       
+        int cpu = smp_processor_id();
+        ktime_t next;
+        
+        tick_periodic(cpu);
+
+        if (dev->mode != CLOCK_EVT_MODE_ONESHOT)
+                return;
+
+	// 若此时为周期时间，则直接返回
+	// 若为 one-shot 模式 ，则需要编程设置下一个时钟事件
+
+        /*
+         * Setup the next period for devices, which do not have
+         * periodic mode:
+         */             
+        next = ktime_add(dev->next_event, tick_period);
+        for (;;) {
+                if (!clockevents_program_event(dev, next, ktime_get()))
+                        return;
+                /*
+                 * Have to be careful here. If we're in oneshot mode,
+                 * before we call tick_periodic() in a loop, we need
+                 * to be sure we're using a real hardware clocksource.
+                 * Otherwise we could get trapped in an infinite
+                 * loop, as the tick_periodic() increments jiffies,
+                 * when then will increment time, posibly causing
+                 * the loop to trigger again and again.
+                 */
+                if (timekeeping_valid_for_hres())
+                        tick_periodic(cpu);
+                next = ktime_add(next, tick_period);
+        }
+}
+
+
 /*      
  * Periodic tick
  */     
