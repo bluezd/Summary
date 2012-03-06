@@ -2349,13 +2349,13 @@ static void tick_setup_device(struct tick_device *td,
                               const struct cpumask *cpumask)
 {
         ktime_t next_event;
-        void (*handler)(struct clock_event_device *) = NULL;
+        void (*handler)(struct clock_vent_device *) = NULL;
 
         /*
          * First device setup ?
          */
         if (!td->evtdev) {
-        // 此时钟设备没有相关的时钟事件设备
+        // 此时钟事件设备没有相关的时钟设备
 	
                 /*
                  * If no cpu took the do_timer update, assign it to
@@ -2611,7 +2611,8 @@ static void hpet_set_mode(enum clock_event_mode mode,
         }
 }
 
-
+run_local_timers()
+trigger->
 run_timer_softirq()
    --> hrtimer_run_pending()
 	  --> hrtimer_switch_to_hres()
@@ -2787,6 +2788,25 @@ smp_apic_timer_interrupt()
 
 
 
+In Summary:
+1. Global Clock Event device (hpet) 
+2. Local Clock Event device (lapic eg.4 cpu)
+
+首先，初始化全局时钟事件设备 hpet ,之后初始化本地 cpu lapic，假设 4 个 cpu,则 设置4次，都将 event_handler 设置为 tick_handle_periodic
+
+ Running as the following instructions:
+ clockevents_register_device()
+  -> tick_setup_device() 
+      -> tick_setup_periodic()
+	 set the event_handler = tick_handle_periodic 
+
+
+最后：
+invoke the tick_broadcast_switch_to_oneshot()
+	    -> tick_broadcast_setup_oneshot()
+	       // 设置 event_handler 为 tick_handle_oneshot_broadcast 
+
+
 ---------------------------------------------------------------------------------------------------------------------------------------------------------
 start_secondary()
 {
@@ -2922,7 +2942,10 @@ static inline void smp_prepare_cpus(unsigned int max_cpus)
 
 
 kernel_init()
-  --> smp_prepare_cpus(setup_max_cpus) --> native_smp_prepare_cpus(64)
+  --> smp_prepare_cpus(setup_max_cpus) ==> native_smp_prepare_cpus(64)
+       -> x86_init.timers.setup_percpu_clockev() ==> setup_boot_APIC_clock()
+	 一切尽在不言中 ......
+	                       
 
 native_smp_prepare_cpus()
 
