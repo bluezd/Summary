@@ -2134,9 +2134,11 @@ static int __kprobes notifier_call_chain(struct notifier_block **nl,
 #endif
                 ret = nb->notifier_call(nb, val, v);
                 // 调用 tick_notify 函数 val = CLOCK_EVT_NOTIFY_ADD 
+                // 返回 ret = NOTIFY_STOP
 
                 if (nr_calls)
                         (*nr_calls)++;
+                // nr_calls = NULL;
 
                 if ((ret & NOTIFY_STOP_MASK) == NOTIFY_STOP_MASK)
                         break;
@@ -2145,6 +2147,11 @@ static int __kprobes notifier_call_chain(struct notifier_block **nl,
         }
         return ret;
 }
+
+#define NOTIFY_STOP_MASK        0x8000          /* Don't call further */
+#define NOTIFY_DONE             0x0000          /* Don't care */
+#define NOTIFY_OK               0x0001          /* Suits me */
+#define NOTIFY_STOP             (NOTIFY_OK|NOTIFY_STOP_MASK) 
 
 /*
  * Notification about clock event devices
@@ -2243,6 +2250,8 @@ static int tick_check_new_device(struct clock_event_device *newdev)
          * feature.
          */
         if (curdev) {
+		// Global Clock event device 第二次来到这里
+		
                 /*
                  * Prefer one shot capable devices !
                  */
@@ -2338,6 +2347,35 @@ void clockevents_shutdown(struct clock_event_device *dev)
 {
         clockevents_set_mode(dev, CLOCK_EVT_MODE_SHUTDOWN);
         dev->next_event.tv64 = KTIME_MAX;
+}
+
+/*
+ * Check, if the device can be utilized as broadcast device:
+ */
+int tick_check_broadcast_device(struct clock_event_device *dev)
+{
+        if ((tick_broadcast_device.evtdev &&
+             tick_broadcast_device.evtdev->rating >= dev->rating) ||
+             (dev->features & CLOCK_EVT_FEAT_C3STOP))
+                return 0;
+
+        clockevents_exchange_device(NULL, dev);
+        tick_broadcast_device.evtdev = dev;
+        if (!cpumask_empty(tick_get_broadcast_mask()))
+                tick_broadcast_start_periodic(dev);
+        // 设置周期模式
+        return 1;
+}
+
+static struct tick_device tick_broadcast_device;
+
+/*      
+ * Start the device in periodic mode 
+ */     
+static void tick_broadcast_start_periodic(struct clock_event_device *bc)
+{       
+        if (bc)
+                tick_setup_periodic(bc, 1);
 }
 
 
@@ -2611,98 +2649,239 @@ static void hpet_set_mode(enum clock_event_mode mode,
         }
 }
 
-run_local_timers()
-trigger->
-run_timer_softirq()
-   --> hrtimer_run_pending()
-	  --> hrtimer_switch_to_hres()
-	        --> tick_init_highres()
-	              --> tick_switch_to_oneshot()
-	                    --> tick_broadcast_switch_to_oneshot()
-	                          --> tick_broadcast_setup_oneshot()
 
-/**
- * tick_init_highres - switch to high resolution mode
- *
- * Called with interrupts disabled.
- */
-int tick_init_highres(void)
-{
-        return tick_switch_to_oneshot(hrtimer_interrupt);
-}
-
-/**
- * tick_switch_to_oneshot - switch to oneshot mode
- */
-int tick_switch_to_oneshot(void (*handler)(struct clock_event_device *))
-{
-        struct tick_device *td = &__get_cpu_var(tick_cpu_device);
-        struct clock_event_device *dev = td->evtdev;
-
-        if (!dev || !(dev->features & CLOCK_EVT_FEAT_ONESHOT) ||
-                    !tick_device_is_functional(dev)) {
-
-                printk(KERN_INFO "Clockevents: "
-                       "could not switch to one-shot mode:");
-                if (!dev) {
-                        printk(" no tick device\n");
-                } else {
-                        if (!tick_device_is_functional(dev))
-                                printk(" %s is not functional.\n", dev->name);
-                        else 
-                                printk(" %s does not support one-shot mode.\n",
-                                       dev->name);
-                }    
-                return -EINVAL;
-        }    
-
-        td->mode = TICKDEV_MODE_ONESHOT;
-        dev->event_handler = handler;
-
-        clockevents_set_mode(dev, CLOCK_EVT_MODE_ONESHOT);
-        tick_broadcast_switch_to_oneshot();
-        return 0;
-}
-
-
-/**
- * tick_broadcast_setup_oneshot - setup the broadcast device
- */
-void tick_broadcast_setup_oneshot(struct clock_event_device *bc)
-{
-        /* Set it up only once ! */
-        if (bc->event_handler != tick_handle_oneshot_broadcast) {
-                int was_periodic = bc->mode == CLOCK_EVT_MODE_PERIODIC;
-                int cpu = smp_processor_id();
-
-                bc->event_handler = tick_handle_oneshot_broadcast;
-                clockevents_set_mode(bc, CLOCK_EVT_MODE_ONESHOT);
-
-                /* Take the do_timer update */
-                tick_do_timer_cpu = cpu;
-
-                /*
-                 * We must be careful here. There might be other CPUs
-                 * waiting for periodic broadcast. We need to set the
-                 * oneshot_mask bits for those and program the
-                 * broadcast device to fire.
-                 */
-                cpumask_copy(to_cpumask(tmpmask), tick_get_broadcast_mask());
-                cpumask_clear_cpu(cpu, to_cpumask(tmpmask));
-                cpumask_or(tick_get_broadcast_oneshot_mask(),
-                           tick_get_broadcast_oneshot_mask(),
-                           to_cpumask(tmpmask));
-
-                if (was_periodic && !cpumask_empty(to_cpumask(tmpmask))) {
-                        tick_broadcast_init_next_event(to_cpumask(tmpmask),
-                                                       tick_next_period);
-                        tick_broadcast_set_event(tick_next_period, 1);
-                } else
-                        bc->next_event.tv64 = KTIME_MAX;
-        }
-}
-
-
+ +-------------------------------------------------------------------------------------------------------+
+ |      run_local_timers()                                                                               |
+ |      trigger->                                                                                        |
+ |      run_timer_softirq()                                                                              |
+ |         --> hrtimer_run_pending()                                                                     |
+ |      	  --> hrtimer_switch_to_hres()                                                           |
+ |      		--> tick_init_highres()                                                          |
+ |      		      --> tick_switch_to_oneshot()                                               |
+ |      			    --> tick_broadcast_switch_to_oneshot()                               |
+ |      				  --> tick_broadcast_setup_oneshot()                             |
+ |                                                                                                       |
+ |      /*                                                                                               |
+ |       * Called by the local, per-CPU timer interrupt on SMP.                                          |
+ |       */                                                                                              |
+ |      void run_local_timers(void)                                                                      |
+ |      {                                                                                                |
+ |      	hrtimer_run_queues();                                                                    |
+ |      	raise_softirq(TIMER_SOFTIRQ);                                                            |
+ |      }                                                                                                |
+ |                                                                                                       |
+ |      /*                                                                                               |
+ |       * This function runs timers and the timer-tq in bottom half context.                            |
+ |       */                                                                                              |
+ |      static void run_timer_softirq(struct softirq_action *h)                                          |
+ |      {                                                                                                |
+ |      	struct tvec_base *base = __get_cpu_var(tvec_bases);                                      |
+ |                                                                                                       |
+ |      	perf_event_do_pending();                                                                 |
+ |                                                                                                       |
+ |      	hrtimer_run_pending();                                                                   |
+ |                                                                                                       |
+ |      	if (time_after_eq(jiffies, base->timer_jiffies))                                         |
+ |      		__run_timers(base);                                                              |
+ |      }                                                                                                |
+ |                                                                                                       |
+ |      /*                                                                                               |
+ |       * Called from timer softirq every jiffy, expire hrtimers:                                       |
+ |       *                                                                                               |
+ |       * For HRT its the fall back code to run the softirq in the timer                                |
+ |       * softirq context in case the hrtimer initialization failed or has                              |
+ |       * not been done yet.                                                                            |
+ |       */                                                                                              |
+ |      void hrtimer_run_pending(void)                                                                   |
+ |      {                                                                                                |
+ |      	if (hrtimer_hres_active())                                                               |
+ |      		return;                                                                          |
+ |      		                                                                                 |
+ |      	/*                                                                                       |
+ |      	 * This _is_ ugly: We have to check in the softirq context,                              |
+ |      	 * whether we can switch to highres and / or nohz mode. The                              |
+ |      	 * clocksource switch happens in the timer interrupt with                                |
+ |      	 * xtime_lock held. Notification from there only sets the                                |
+ |      	 * check bit in the tick_oneshot code, otherwise we might                                |
+ |      	 * deadlock vs. xtime_lock.                                                              |
+ |      	 */                                                                                      |
+ |      	if (tick_check_oneshot_change(!hrtimer_is_hres_enabled()))                               |
+ |      		hrtimer_switch_to_hres();                                                        |
+ |              // 检查系统中是否存在适用于高分辨率定时器的时钟事件设备                                  |
+ |      	// whether we can switch to highres and / or nohz mode                                   |
+ |      }                                                                                                |
+ |                                                                                                       |
+ |      /*                                                                                               |
+ |       *  * hrtimer_high_res_enabled - query, if the highres mode is enabled                           |
+ |       *   */                                                                                          |
+ |      static inline int hrtimer_is_hres_enabled(void)                                                  |
+ |      {                                                                                                |
+ |      		return hrtimer_hres_enabled;                                                     |
+ |                      // 正常情况下 为 1                                                               |
+ |      }                                                                                                |
+ |                                                                                                       |
+ |      /**                                                                                              |
+ |       * Check, if a change happened, which makes oneshot possible.                                    |
+ |       *                                                                                               |
+ |       * Called cyclic from the hrtimer softirq (driven by the timer                                   |
+ |       * softirq) allow_nohz signals, that we can switch into low-res nohz                             |
+ |       * mode, because high resolution timers are disabled (either compile                             |
+ |       * or runtime).                                                                                  |
+ |       */                                                                                              |
+ |      int tick_check_oneshot_change(int allow_nohz)                                                    |
+ |      {                                                                                                |
+ |      	struct tick_sched *ts = &__get_cpu_var(tick_cpu_sched);                                  |
+ |                                                                                                       |
+ |      	if (!test_and_clear_bit(0, &ts->check_clocks))                                           |
+ |      		return 0;                                                                        |
+ |                                                                                                       |
+ |      	if (ts->nohz_mode != NOHZ_MODE_INACTIVE)                                                 |
+ |      		return 0;                                                                        |
+ |                                                                                                       |
+ |      	if (!timekeeping_valid_for_hres() || !tick_is_oneshot_available())                       |
+ |      		return 0;                                                                        |
+ |                                                                                                       |
+ |      	if (!allow_nohz)                                                                         |
+ |      		return 1;                                                                        |
+ |                                                                                                       |
+ |              // 如果没有启用 hrtimer 则 switch to nohz mode > all cpu                                 |
+ |      	tick_nohz_switch_to_nohz();                                                              |
+ |      	return 0;                                                                                |
+ |      }                                                                                                |
+ |                                                                                                       |
+ |      /*                                                                                               |
+ |       * Switch to high resolution mode                                                                |
+ |       */                                                                                              |
+ |      static int hrtimer_switch_to_hres(void)                                                          |
+ |      {                                                                                                |
+ |      	int cpu = smp_processor_id();                                                            |
+ |      	struct hrtimer_cpu_base *base = &per_cpu(hrtimer_bases, cpu);                            |
+ |      	unsigned long flags;                                                                     |
+ |                                                                                                       |
+ |      	if (base->hres_active)                                                                   |
+ |      		return 1;                                                                        |
+ |                                                                                                       |
+ |      	local_irq_save(flags);                                                                   |
+ |                                                                                                       |
+ |      	if (tick_init_highres()) {                                                               |
+ |      		local_irq_restore(flags);                                                        |
+ |      		printk(KERN_WARNING "Could not switch to high resolution "                       |
+ |      				    "mode on CPU %d\n", cpu);                                    |
+ |      		return 0;                                                                        |
+ |      	}                                                                                        |
+ |      	base->hres_active = 1;                                                                   |
+ |      	base->clock_base[CLOCK_REALTIME].resolution = KTIME_HIGH_RES;                            |
+ |      	base->clock_base[CLOCK_MONOTONIC].resolution = KTIME_HIGH_RES;                           |
+ |                                                                                                       |
+ |      	tick_setup_sched_timer();                                                                |
+ |                                                                                                       |
+ |      	/* "Retrigger" the interrupt to get things going */                                      |
+ |      	retrigger_next_event(NULL);                                                              |
+ |      	local_irq_restore(flags);                                                                |
+ |      	return 1;                                                                                |
+ |      }                                                                                                |
+ |                                                                                                       |
+ |                                                                                                       |
+ |      /**                                                                                              |
+ |       * tick_init_highres - switch to high resolution mode                                            |
+ |       *                                                                                               |
+ |       * Called with interrupts disabled.                                                              |
+ |       */                                                                                              |
+ |      int tick_init_highres(void)                                                                      |
+ |      {                                                                                                |
+ |      	return tick_switch_to_oneshot(hrtimer_interrupt);                                        |
+ |      }                                                                                                |
+ |                                                                                                       |
+ |      /**                                                                                              |
+ |       * tick_switch_to_oneshot - switch to oneshot mode                                               |
+ |       */                                                                                              |
+ |      int tick_switch_to_oneshot(void (*handler)(struct clock_event_device *))                         |
+ |      {                                                                                                |
+ |      	struct tick_device *td = &__get_cpu_var(tick_cpu_device);                                |
+ |      	struct clock_event_device *dev = td->evtdev;                                             |
+ |                                                                                                       |
+ |      	if (!dev || !(dev->features & CLOCK_EVT_FEAT_ONESHOT) ||                                 |
+ |      		    !tick_device_is_functional(dev)) {                                           |
+ |                                                                                                       |
+ |      		printk(KERN_INFO "Clockevents: "                                                 |
+ |      		       "could not switch to one-shot mode:");                                    |
+ |      		if (!dev) {                                                                      |
+ |      			printk(" no tick device\n");                                             |
+ |      		} else {                                                                         |
+ |      			if (!tick_device_is_functional(dev))                                     |
+ |      				printk(" %s is not functional.\n", dev->name);                   |
+ |      			else                                                                     |
+ |      				printk(" %s does not support one-shot mode.\n",                  |
+ |      				       dev->name);                                               |
+ |      		}                                                                                |
+ |      		return -EINVAL;                                                                  |
+ |      	}                                                                                        |
+ |                                                                                                       |
+ |      	td->mode = TICKDEV_MODE_ONESHOT;                                                         |
+ |      	dev->event_handler = handler;                                                            |
+ |                                                                                                       |
+ |      	clockevents_set_mode(dev, CLOCK_EVT_MODE_ONESHOT);                                       |
+ |      	tick_broadcast_switch_to_oneshot();                                                      |
+ |      	return 0;                                                                                |
+ |      }                                                                                                |
+ |                                                                                                       |
+ |                                                                                                       |
+ |      /*                                                                                               |
+ |       * Select oneshot operating mode for the broadcast device                                        |
+ |       */                                                                                              |
+ |      void tick_broadcast_switch_to_oneshot(void)                                                      |
+ |      {                                                                                                |
+ |      	struct clock_event_device *bc;                                                           |
+ |      	unsigned long flags;                                                                     |
+ |      				                                                                 |
+ |      	spin_lock_irqsave(&tick_broadcast_lock, flags);                                          |
+ |      		                                                                                 |
+ |      	tick_broadcast_device.mode = TICKDEV_MODE_ONESHOT;                                       |
+ |      	bc = tick_broadcast_device.evtdev;                                                       |
+ |      	if (bc)                                                                                  |
+ |      		tick_broadcast_setup_oneshot(bc);                                                |
+ |      	spin_unlock_irqrestore(&tick_broadcast_lock, flags);                                     |
+ |      }                                                                                                |
+ |                                                                                                       |
+ |                                                                                                       |
+ |      /**                                                                                              |
+ |       * tick_broadcast_setup_oneshot - setup the broadcast device                                     |
+ |       */                                                                                              |
+ |      void tick_broadcast_setup_oneshot(struct clock_event_device *bc)                                 |
+ |      {                                                                                                |
+ |      	/* Set it up only once ! */                                                              |
+ |      	if (bc->event_handler != tick_handle_oneshot_broadcast) {                                |
+ |      		int was_periodic = bc->mode == CLOCK_EVT_MODE_PERIODIC;                          |
+ |      		int cpu = smp_processor_id();                                                    |
+ |                                                                                                       |
+ |      		bc->event_handler = tick_handle_oneshot_broadcast;                               |
+ |      		clockevents_set_mode(bc, CLOCK_EVT_MODE_ONESHOT);                                |
+ |                                                                                                       |
+ |      		/* Take the do_timer update */                                                   |
+ |      		tick_do_timer_cpu = cpu;                                                         |
+ |                                                                                                       |
+ |      		/*                                                                               |
+ |      		 * We must be careful here. There might be other CPUs                            |
+ |      		 * waiting for periodic broadcast. We need to set the                            |
+ |      		 * oneshot_mask bits for those and program the                                   |
+ |      		 * broadcast device to fire.                                                     |
+ |      		 */                                                                              |
+ |      		cpumask_copy(to_cpumask(tmpmask), tick_get_broadcast_mask());                    |
+ |      		cpumask_clear_cpu(cpu, to_cpumask(tmpmask));                                     |
+ |      		cpumask_or(tick_get_broadcast_oneshot_mask(),                                    |
+ |      			   tick_get_broadcast_oneshot_mask(),                                    |
+ |      			   to_cpumask(tmpmask));                                                 |
+ |                                                                                                       |
+ |      		if (was_periodic && !cpumask_empty(to_cpumask(tmpmask))) {                       |
+ |      			tick_broadcast_init_next_event(to_cpumask(tmpmask),                      |
+ |      						       tick_next_period);                        |
+ |      			tick_broadcast_set_event(tick_next_period, 1);                           |
+ |      		} else                                                                           |
+ |      			bc->next_event.tv64 = KTIME_MAX;                                         |
+ |      	}                                                                                        |
+ |      }                                                                                                |
+ |                                                                                                       |
+ +-------------------------------------------------------------------------------------------------------+
 
 timer_interrupt() 时钟中断处理程序
 	--> global_clock_event->event_handler(global_clock_event); --> tick_handle_oneshot_broadcast
