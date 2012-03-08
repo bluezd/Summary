@@ -2024,7 +2024,9 @@ void clockevents_register_device(struct clock_event_device *dev)
         list_add(&dev->list, &clockevent_devices);
 	// 加入到 clockevent_devices 链表中
         clockevents_do_notify(CLOCK_EVT_NOTIFY_ADD, dev);
+
         clockevents_notify_released();
+	// 当 Global Clock Event Device 注册完 hpet 和 cpu0 注册 lapic 之后会被调用.
 
         spin_unlock_irqrestore(&clockevents_lock, flags);
 }
@@ -2225,7 +2227,6 @@ static int tick_check_new_device(struct clock_event_device *newdev)
         // tick_cpu_device 是一个各CPU链表，包含了系统中每个CPU对应的struct tick_device 实例.
 
         curdev = td->evtdev;
-        curdev = NULL;
 
         /* cpu local device ? */
         if (!cpumask_equal(newdev->cpumask, cpumask_of(cpu))) {
@@ -2250,8 +2251,12 @@ static int tick_check_new_device(struct clock_event_device *newdev)
          * feature.
          */
         if (curdev) {
-		// Global Clock event device 第二次来到这里
-		
+		// 2.curdev = hpet
+		// 2.newdev = lapic
+
+		// 3.curdev = lapic
+		// 3.newdev = hpet
+
                 /*
                  * Prefer one shot capable devices !
                  */
@@ -2263,6 +2268,8 @@ static int tick_check_new_device(struct clock_event_device *newdev)
                  */
                 if (curdev->rating >= newdev->rating)
                         goto out_bc;
+
+		// lapic rating = 100,hpet rating = 50 
         }
 
         /*
@@ -2274,7 +2281,9 @@ static int tick_check_new_device(struct clock_event_device *newdev)
                 clockevents_shutdown(curdev);
                 curdev = NULL;
         }
+
         clockevents_exchange_device(curdev, newdev);
+
         tick_setup_device(td, newdev, cpu, cpumask_of(cpu));
         if (newdev->features & CLOCK_EVT_FEAT_ONESHOT)
                 tick_oneshot_notify();
@@ -2316,8 +2325,11 @@ out_bc:
 void clockevents_exchange_device(struct clock_event_device *old,
                                  struct clock_event_device *new)
 {
-        old = NULL
-        new = &hpet_clockevent 
+        //old = NULL
+        //new = &hpet_clockevent 
+	
+	// old = hpet 
+	// new = lapic
 
         unsigned long flags;
 
@@ -2330,6 +2342,7 @@ void clockevents_exchange_device(struct clock_event_device *old,
                 clockevents_set_mode(old, CLOCK_EVT_MODE_UNUSED);
                 list_del(&old->list);
                 list_add(&old->list, &clockevents_released);
+		// 加到 clockevents_released 链表中
         }
 
         if (new) {
@@ -2360,7 +2373,10 @@ int tick_check_broadcast_device(struct clock_event_device *dev)
                 return 0;
 
         clockevents_exchange_device(NULL, dev);
+
         tick_broadcast_device.evtdev = dev;
+        // 设置为 hpet
+	
         if (!cpumask_empty(tick_get_broadcast_mask()))
                 tick_broadcast_start_periodic(dev);
         // 设置周期模式
@@ -2650,6 +2666,34 @@ static void hpet_set_mode(enum clock_event_mode mode,
 }
 
 
+
+/*
+ * Called after a notify add to make devices available which were
+ * released from the notifier call.
+ */
+static void clockevents_notify_released(void)
+{
+        struct clock_event_device *dev;
+
+        while (!list_empty(&clockevents_released)) {
+		// 为空 list_empty 返回 1,如果 clockevents_released 链表不为空则进入循环
+		// 现在链表中的设备为 hpet
+
+                dev = list_entry(clockevents_released.next,
+                                 struct clock_event_device, list);
+
+		// dev 指向 hpet_clockevent  
+                list_del(&dev->list);
+                list_add(&dev->list, &clockevent_devices);
+		// 再次加入到 clockevent_devices 链表
+                clockevents_do_notify(CLOCK_EVT_NOTIFY_ADD, dev);
+		// 再次设置 event_handler
+        }
+}
+  
+static LIST_HEAD(clockevents_released);
+
+
  +-------------------------------------------------------------------------------------------------------+
  |      run_local_timers()                                                                               |
  |      trigger->                                                                                        |
@@ -2694,6 +2738,7 @@ static void hpet_set_mode(enum clock_event_mode mode,
  |       */                                                                                              |
  |      void hrtimer_run_pending(void)                                                                   |
  |      {                                                                                                |
+ |               // 如果此时已经是高精度模式则无需转换                                                   |
  |      	if (hrtimer_hres_active())                                                               |
  |      		return;                                                                          |
  |      		                                                                                 |
@@ -2838,6 +2883,8 @@ static void hpet_set_mode(enum clock_event_mode mode,
  |      		                                                                                 |
  |      	tick_broadcast_device.mode = TICKDEV_MODE_ONESHOT;                                       |
  |      	bc = tick_broadcast_device.evtdev;                                                       |
+ |              // bc 为 Golbal Event Device.为 hpet                                                     |
+ |                                                                                                       |
  |      	if (bc)                                                                                  |
  |      		tick_broadcast_setup_oneshot(bc);                                                |
  |      	spin_unlock_irqrestore(&tick_broadcast_lock, flags);                                     |
@@ -2855,6 +2902,7 @@ static void hpet_set_mode(enum clock_event_mode mode,
  |      		int cpu = smp_processor_id();                                                    |
  |                                                                                                       |
  |      		bc->event_handler = tick_handle_oneshot_broadcast;                               |
+                        // 设置 Global Event Device broadcast mode
  |      		clockevents_set_mode(bc, CLOCK_EVT_MODE_ONESHOT);                                |
  |                                                                                                       |
  |      		/* Take the do_timer update */                                                   |
@@ -2880,6 +2928,12 @@ static void hpet_set_mode(enum clock_event_mode mode,
  |      			bc->next_event.tv64 = KTIME_MAX;                                         |
  |      	}                                                                                        |
  |      }                                                                                                |
+ |                                                                                                       |
+ |        最终设置 Global Clock Event Device hpet -> event_handler = tick_handle_oneshot_broadcast       |
+ |	          Local APIC                      -> event_handler = hrtimer_interrupt                   |
+ |	          Local APIC                      -> event_handler = hrtimer_interrupt                   |
+ |	          Local APIC                      -> event_handler = hrtimer_interrupt                   |
+ |	          Local APIC                      -> event_handler = hrtimer_interrupt                   |
  |                                                                                                       |
  +-------------------------------------------------------------------------------------------------------+
 
