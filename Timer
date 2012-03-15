@@ -2935,7 +2935,45 @@ static LIST_HEAD(clockevents_released);
  |	          Local APIC                      -> event_handler = hrtimer_interrupt                   |
  |	          Local APIC                      -> event_handler = hrtimer_interrupt                   |
  |                                                                                                       |
+ |     只有在 LAPIC 存在下的情况下 Global 才会是 broadcast mode：                                        |
+ |          set boot parameter "nolapic",cpu0 global event_handler:                                      |
+ |	                                                           hres:                                 |
+ |	                                                           hrtimer_interrupt ()                  |
+ |	                                                           lres:                                 |
+ |								   tick_nohz_handler ()                  |
+ |	                                                           tick_handle_periodic ()               |
+ |                                                                                                       |
+ |                                                                                                       |
  +-------------------------------------------------------------------------------------------------------+
+
+1.正常情况下
+   event_handler:  tick_handle_oneshot_broadcast
+   event_handler:  hrtimer_interrupt
+   event_handler:  hrtimer_interrupt
+   event_handler:  hrtimer_interrupt
+   event_handler:  hrtimer_interrupt
+
+   // cpu 0-3 都参与更新 jiffies do_timer 工作 (global 好像不参加)
+      smp_apic_timer_interrupt()
+       -> irq_enter()
+	   -> tick_check_idle()
+	       -> tick_check_nohz()
+	           -> tick_nohz_update_jiffies()
+	               -> tick_do_update_jiffies64()
+	                   -> do_timer(++ticks)
+
+
+2.boot parameter "nohz=off highres=off"
+   event_handler:  clockevents_handle_noop
+   event_handler:  tick_handle_periodic
+   event_handler:  tick_handle_periodic
+   event_handler:  tick_handle_periodic
+   event_handler:  tick_handle_periodic
+
+  // tick_do_timer_cpu = 0  CPU0(lapic) 负责更新 jiffies do_timer
+
+
+
 
 timer_interrupt() 时钟中断处理程序
 	--> global_clock_event->event_handler(global_clock_event); --> tick_handle_oneshot_broadcast
