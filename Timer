@@ -2973,6 +2973,14 @@ static LIST_HEAD(clockevents_released);
   // tick_do_timer_cpu = 0  CPU0(lapic) 负责更新 jiffies do_timer
 
 
+3.boot parameter "nohz=off highres=off"
+   event_handler:  tick_handle_periodic_broadcast
+   event_handler:  tick_handle_periodic
+   event_handler:  tick_handle_periodic
+   event_handler:  tick_handle_periodic
+   event_handler:  tick_handle_periodic
+
+   // 跟 2 一样
 
 
 timer_interrupt() 时钟中断处理程序
