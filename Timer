@@ -2982,6 +2982,15 @@ static LIST_HEAD(clockevents_released);
 
    // 跟 2 一样
 
+4.boot parameter "highres=off"
+   event_handler:  tick_handle_oneshot_broadcast
+   event_handler:  tick_nohz_handler
+   event_handler:  tick_nohz_handler
+   event_handler:  tick_nohz_handler
+   event_handler:  tick_nohz_handler
+
+   // 跟 1 一样
+
 
 timer_interrupt() 时钟中断处理程序
 	--> global_clock_event->event_handler(global_clock_event); --> tick_handle_oneshot_broadcast
