@@ -327,8 +327,915 @@ already_registered:
 backend-api: This API is declared in <linux/fscache-cache.h>
 front-api:                           <linux/fscache.h>
 
+Note:
 当 client 端读取一个文件的时候，nfs 会调用 fscache 的 API 实现缓存操作，缓存到 /var/cache/fscache/cache 下
 当 client 写一个文件时，不会发生缓存操作。
 
-当 client 挂在 server export 出的目录到本地时(假设挂载到 /mnt下)，那此时在本地 ll /mnt 显示的内容（目录和文件的信息）都因该保存在本地的内存中，并且如果在 client 端读取 server 端的一个文件时，对应该文件的内容会被 nfs 缓存到内存中，也同时会被 fscache 缓存到本地
+当 client 挂在 server export 出的目录到本地时(假设挂载到 /mnt下)，那此时在本地 ll /mnt 显示的内容（目录和文件的信息dentry and inode）都应该保存在本地的内存中（相应的结构中），并且如果在 client 端读取 server 端的一个文件时，对应该文件的内容会被 nfs 缓存到内存中，也同时会被 fscache 缓存到本地。
 
+当 client 挂载 server export 出的目录到本地时(假设挂载到本地的 /mnt下)，那此时在本地 ll /mnt 显示的内容（目录和文件的信息dentry and inode）都应该保存在本地的内存中（相应的结构中），并且如果在 client 端读取 server 端的一个文件时，对应该文件的内容会被 nfs 缓存到内存中，也同时会被 fscache 缓存到本地.
+
+当 client 端读取一个文件的时候，nfs 会调用 fscache 的 API 实现缓存操作，缓存到 /var/cache/fscache/cache 下，当只有读取文件时才会 fscache 到本地，当 client 写一个文件时根本就不会 fscache 到本地.(文件写打开的时候cache就失效了,文件可写打开时候nfs会主动失效cache).
+
+
+
+-------------------------------------------------------- 8< ---------------------------------------------------------------------------------------------------
+NFS 挂载大致过程:
+
+fs/namespace.c:
+SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,char __user *, type, unsigned long, flags, void __user *, data)
+  -> do_mount()
+      -> do_new_mount()
+	  -> do_kern_mount()
+
+
+struct vfsmount *
+do_kern_mount(const char *fstype, int flags, const char *name, void *data)
+{
+        struct file_system_type *type = get_fs_type(fstype);
+        // 文件系统类型 nfs_fs_type  
+
+        struct vfsmount *mnt;
+        if (!type)
+                return ERR_PTR(-ENODEV);
+        mnt = vfs_kern_mount(type, flags, name, data);
+        if (!IS_ERR(mnt) && (type->fs_flags & FS_HAS_SUBTYPE) &&
+            !mnt->mnt_sb->s_subtype)
+                mnt = fs_set_subtype(mnt, fstype);
+        put_filesystem(type);
+        return mnt;
+}
+
+static struct file_system_type nfs_fs_type = {
+        .owner          = THIS_MODULE,
+        .name           = "nfs",
+        .get_sb         = nfs_get_sb,
+        .kill_sb        = nfs_kill_super,
+        .fs_flags       = FS_RENAME_DOES_D_MOVE|FS_REVAL_DOT|FS_BINARY_MOUNTDATA,
+};
+
+struct vfsmount *
+vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void *data)
+{
+        struct vfsmount *mnt;
+        char *secdata = NULL;
+        int error;
+
+        if (!type)
+                return ERR_PTR(-ENODEV);
+
+        error = -ENOMEM;
+        mnt = alloc_vfsmnt(name);
+        // 创建一个 struct vfsmount 结构 以挂载文件系统描述符
+
+        if (!mnt)
+                goto out;
+
+        if (data && !(type->fs_flags & FS_BINARY_MOUNTDATA)) {
+                secdata = alloc_secdata();
+                if (!secdata)
+                        goto out_mnt;
+
+                error = security_sb_copy_data(data, secdata);
+                if (error)
+                        goto out_free_secdata;
+        }
+
+        error = type->get_sb(type, flags, name, data, mnt);
+        // Get SB 
+        // inovke the nfs_get_sb()
+
+        if (error < 0)
+                goto out_free_secdata;
+        BUG_ON(!mnt->mnt_sb);
+
+        error = security_sb_kern_mount(mnt->mnt_sb, flags, secdata);
+        if (error)
+                goto out_sb;
+
+        /*
+         * filesystems should never set s_maxbytes larger than MAX_LFS_FILESIZE
+         * but s_maxbytes was an unsigned long long for many releases. Throw
+         * this warning for a little while to try and catch filesystems that
+         * violate this rule. This warning should be either removed or
+         * converted to a BUG() in 2.6.34.
+         */
+        WARN((mnt->mnt_sb->s_maxbytes < 0), "%s set sb->s_maxbytes to "
+                "negative value (%lld)\n", type->name, mnt->mnt_sb->s_maxbytes);
+
+        mnt->mnt_mountpoint = mnt->mnt_root;
+        mnt->mnt_parent = mnt;
+        up_write(&mnt->mnt_sb->s_umount);
+        free_secdata(secdata);
+        return mnt;
+out_sb:
+        dput(mnt->mnt_root);
+        deactivate_locked_super(mnt->mnt_sb);
+out_free_secdata:
+        free_secdata(secdata);
+out_mnt:
+        free_vfsmnt(mnt);
+out:
+        return ERR_PTR(error);
+}
+
+static int nfs_get_sb(struct file_system_type *fs_type,
+        int flags, const char *dev_name, void *raw_data, struct vfsmount *mnt)
+{
+        struct nfs_server *server = NULL;
+        struct super_block *s;
+        struct nfs_parsed_mount_data *data;
+        struct nfs_fh *mntfh;
+        struct dentry *mntroot;
+        int (*compare_super)(struct super_block *, void *) = nfs_compare_super;
+        struct nfs_sb_mountdata sb_mntdata = {
+                .mntflags = flags,
+        };
+        int error = -ENOMEM;
+
+        data = nfs_alloc_parsed_mount_data(NFS_DEFAULT_VERSION);
+        // 创建一个 nfs_parsed_mount_data (In-kernel mount arguments)
+
+        mntfh = nfs_alloc_fhandle();
+        // 创建一个 client file handle
+
+        if (data == NULL || mntfh == NULL)
+                goto out_free_fh;
+
+        security_init_mnt_opts(&data->lsm_opts);
+
+        /* Validate the mount data */
+        error = nfs_validate_mount_data(raw_data, data, mntfh, dev_name);
+        if (error < 0)
+                goto out;
+
+#ifdef CONFIG_NFS_V4
+        if (data->version == 4) {
+                error = nfs4_try_mount(flags, dev_name, data, mnt);
+                kfree(data->client_address);
+                kfree(data->nfs_server.export_path);
+                goto out;
+        }
+#endif  /* CONFIG_NFS_V4 */
+
+        /* Get a volume representation */
+        server = nfs_create_server(data, mntfh);
+        // 创建 struct nfs_server 结构 
+
+        if (IS_ERR(server)) {
+                error = PTR_ERR(server);
+                goto out;
+        }
+        sb_mntdata.server = server;
+
+        if (server->flags & NFS_MOUNT_UNSHARED)
+                compare_super = NULL;
+
+        /* -o noac implies -o sync */
+        if (server->flags & NFS_MOUNT_NOAC)
+                sb_mntdata.mntflags |= MS_SYNCHRONOUS;
+
+        /* Get a superblock - note that we may end up sharing one that already exists */
+        s = sget(fs_type, compare_super, nfs_set_super, &sb_mntdata);
+        // 获得超级块
+
+        if (IS_ERR(s)) {
+                error = PTR_ERR(s);
+                goto out_err_nosb;
+        }
+
+        if (s->s_fs_info != server) {
+                nfs_free_server(server);
+                server = NULL;
+        } else {
+                error = nfs_bdi_register(server);
+                if (error)
+                        goto error_splat_bdi;
+        }
+
+        if (!s->s_root) {
+        // struct superblock 结构中 struct dentry  *s_root
+        // 文件系统根目录的目录项对象(此时为空)
+
+                /* initial superblock/root creation */
+                nfs_fill_super(s, data);
+                nfs_fscache_get_super_cookie(
+                        s, data ? data->fscache_uniq : NULL, NULL);
+        }
+
+        mntroot = nfs_get_root(s, mntfh);
+        // Get the get an NFS2/NFS3 root dentry from the root filehandle 
+        if (IS_ERR(mntroot)) {
+                error = PTR_ERR(mntroot);
+                goto error_splat_super;
+        }
+
+        error = security_sb_set_mnt_opts(s, &data->lsm_opts);
+        if (error)
+                goto error_splat_root;
+
+        s->s_flags |= MS_ACTIVE;
+        mnt->mnt_sb = s;
+        // 指向 superblock
+        mnt->mnt_root = mntroot;
+        // root dentry 
+
+        error = 0;
+
+out:
+        kfree(data->nfs_server.hostname);
+        kfree(data->mount_server.hostname);
+        kfree(data->fscache_uniq);
+        security_free_mnt_opts(&data->lsm_opts);
+out_free_fh:
+        nfs_free_fhandle(mntfh);
+        kfree(data);
+        return error;
+
+out_err_nosb:
+        nfs_free_server(server);
+        goto out;
+
+error_splat_root:
+        dput(mntroot);
+error_splat_super:
+        if (server && !s->s_root)
+                bdi_unregister(&server->backing_dev_info);
+error_splat_bdi:
+        deactivate_locked_super(s);
+        goto out;
+}
+
+struct nfs_fh *nfs_alloc_fhandle(void)
+{       
+        struct nfs_fh *fh;
+        
+        fh = kmalloc(sizeof(struct nfs_fh), GFP_NOFS);
+        if (fh != NULL)
+                fh->size = 0;
+        return fh;
+}       
+
+/*
+ * This is the kernel NFS client file handle representation
+ */
+#define NFS_MAXFHSIZE           128
+struct nfs_fh {
+        unsigned short          size;
+        unsigned char           data[NFS_MAXFHSIZE];
+};
+
+fs/super.c
+/**
+ *      sget    -       find or create a superblock
+ *      @type:  filesystem type superblock should belong to
+ *      @test:  comparison callback
+ *      @set:   setup callback
+ *      @data:  argument to each of them
+ */
+struct super_block *sget(struct file_system_type *type,
+                        int (*test)(struct super_block *,void *),
+                        int (*set)(struct super_block *,void *),
+                        void *data)
+{      
+        struct super_block *s = NULL;
+        struct super_block *old;
+        int err;
+
+retry: 
+        spin_lock(&sb_lock);
+        if (test) {
+        // compare_super()
+                list_for_each_entry(old, &type->fs_supers, s_instances) {
+                // struct file_system_type 结构中 struct list_head fs_supers 字段表示具有相同文件系统类型的超级块对象链表的头
+ 
+                        if (!test(old, data))
+                                continue;
+                        if (!grab_super(old))
+                                goto retry;
+                        if (s) {
+                                up_write(&s->s_umount);
+                                destroy_super(s);
+                        }
+                        return old;
+                }
+        }
+        if (!s) {
+                spin_unlock(&sb_lock);
+                s = alloc_super(type);
+                // 创建一个 super block
+
+                if (!s)
+                        return ERR_PTR(-ENOMEM);
+                goto retry;
+        }
+       
+        err = set(s, data);
+        //nfs_set_super ()  data = &sb_mntdata
+
+        if (err) {
+                spin_unlock(&sb_lock);
+                up_write(&s->s_umount);
+                destroy_super(s);
+                return ERR_PTR(err);
+        }
+        s->s_type = type;
+        strlcpy(s->s_id, type->name, sizeof(s->s_id));
+        list_add_tail(&s->s_list, &super_blocks);
+        // 把此超级块加入到全局链表(super_blocks)中
+
+        list_add(&s->s_instances, &type->fs_supers);
+        // 将超级块加入到文件系统链表中
+
+        spin_unlock(&sb_lock);
+        get_filesystem(type);
+        return s;
+}
+
+struct nfs_sb_mountdata {
+        struct nfs_server *server;
+        int mntflags;
+};
+
+static int nfs_set_super(struct super_block *s, void *data)
+{
+        struct nfs_sb_mountdata *sb_mntdata = data;
+        struct nfs_server *server = sb_mntdata->server;
+        int ret;
+
+        s->s_flags = sb_mntdata->mntflags;
+        s->s_fs_info = server;
+        ret = set_anon_super(s, server);
+        if (ret == 0)
+                server->s_dev = s->s_dev;
+        return ret;
+}
+
+/*
+ * Finish setting up an NFS2/3 superblock
+ */
+static void nfs_fill_super(struct super_block *sb,
+                           struct nfs_parsed_mount_data *data)
+{
+        struct nfs_server *server = NFS_SB(sb);
+        // 获得 super block 结构中的 s->s_fs_info 指向的 struct nfs_server 结构 
+
+        sb->s_blocksize_bits = 0;
+        sb->s_blocksize = 0;
+        if (data->bsize)
+                sb->s_blocksize = nfs_block_size(data->bsize, &sb->s_blocksize_bits);
+
+        if (server->nfs_client->rpc_ops->version == 3) {
+                /* The VFS shouldn't apply the umask to mode bits. We will do
+                 * so ourselves when necessary.
+                 */
+                sb->s_flags |= MS_POSIXACL;
+                sb->s_time_gran = 1;
+        }
+
+        sb->s_op = &nfs_sops;
+        nfs_initialise_sb(sb);
+}
+
+static inline struct nfs_server *NFS_SB(const struct super_block *s)
+{
+        return (struct nfs_server *)(s->s_fs_info);
+}
+
+/*
+ * Initialise the common bits of the superblock
+ */
+static inline void nfs_initialise_sb(struct super_block *sb)
+{
+        struct nfs_server *server = NFS_SB(sb);
+
+        sb->s_magic = NFS_SUPER_MAGIC;
+
+        /* We probably want something more informative here */
+        snprintf(sb->s_id, sizeof(sb->s_id),
+                 "%x:%x", MAJOR(sb->s_dev), MINOR(sb->s_dev));
+
+        if (sb->s_blocksize == 0)
+                sb->s_blocksize = nfs_block_bits(server->wsize,
+                                                 &sb->s_blocksize_bits);
+
+        sb->s_bdi = &server->backing_dev_info;
+
+        nfs_super_set_maxbytes(sb, server->maxfilesize);
+}
+
+/*
+ * Get the cache cookie for an NFS superblock.  We have to handle
+ * uniquification here because the cache doesn't do it for us.
+ *
+ * The default uniquifier is just an empty string, but it may be overridden
+ * either by the 'fsc=xxx' option to mount, or by inheriting it from the parent
+ * superblock across an automount point of some nature.
+ */
+void nfs_fscache_get_super_cookie(struct super_block *sb, const char *uniq,
+                                  struct nfs_clone_mount *mntdata)
+{
+        // mntdata = NULL
+
+        struct nfs_fscache_key *key, *xkey;
+        struct nfs_server *nfss = NFS_SB(sb);
+        struct rb_node **p, *parent;
+        int diff, ulen;
+
+        if (uniq) {
+                ulen = strlen(uniq);
+        } else if (mntdata) {
+                struct nfs_server *mnt_s = NFS_SB(mntdata->sb);
+                if (mnt_s->fscache_key) {
+                        uniq = mnt_s->fscache_key->key.uniquifier;
+                        ulen = mnt_s->fscache_key->key.uniq_len;
+                }
+        }
+
+        if (!uniq) {
+                uniq = "";
+                ulen = 1;
+        }
+
+        key = kzalloc(sizeof(*key) + ulen, GFP_KERNEL);
+        if (!key)
+                return;
+
+        key->nfs_client = nfss->nfs_client;
+        key->key.super.s_flags = sb->s_flags & NFS_MS_MASK;
+        key->key.nfs_server.flags = nfss->flags;
+        key->key.nfs_server.rsize = nfss->rsize;
+        key->key.nfs_server.wsize = nfss->wsize;
+        key->key.nfs_server.acregmin = nfss->acregmin;
+        key->key.nfs_server.acregmax = nfss->acregmax;
+        key->key.nfs_server.acdirmin = nfss->acdirmin;
+        key->key.nfs_server.acdirmax = nfss->acdirmax;
+        key->key.nfs_server.fsid = nfss->fsid;
+        key->key.rpc_auth.au_flavor = nfss->client->cl_auth->au_flavor;
+
+        key->key.uniq_len = ulen;
+        memcpy(key->key.uniquifier, uniq, ulen);
+
+        spin_lock(&nfs_fscache_keys_lock);
+        p = &nfs_fscache_keys.rb_node;
+        parent = NULL;
+        while (*p) {
+                parent = *p;
+                xkey = rb_entry(parent, struct nfs_fscache_key, node);
+
+                if (key->nfs_client < xkey->nfs_client)
+                        goto go_left;
+                if (key->nfs_client > xkey->nfs_client)
+                        goto go_right;
+
+                diff = memcmp(&key->key, &xkey->key, sizeof(key->key));
+                if (diff < 0)
+                        goto go_left;
+                if (diff > 0)
+                        goto go_right;
+
+                if (key->key.uniq_len == 0)
+                        goto non_unique;
+                diff = memcmp(key->key.uniquifier,
+                              xkey->key.uniquifier,
+                              key->key.uniq_len);
+                if (diff < 0)
+                        goto go_left;
+                if (diff > 0)
+                        goto go_right;
+                goto non_unique;
+
+        go_left:
+                p = &(*p)->rb_left;
+                continue;
+        go_right:
+                p = &(*p)->rb_right;
+        }
+
+        rb_link_node(&key->node, parent, p);
+        rb_insert_color(&key->node, &nfs_fscache_keys);
+        spin_unlock(&nfs_fscache_keys_lock);
+        nfss->fscache_key = key;
+
+        /* create a cache index for looking up filehandles */
+        nfss->fscache = fscache_acquire_cookie(nfss->nfs_client->fscache,
+                                               &nfs_fscache_super_index_def,
+                                               nfss);
+        // struct nfs_server 结构中 struct fscache_cookie   *fscache;       /* superblock cookie */ 
+        dfprintk(FSCACHE, "NFS: get superblock cookie (0x%p/0x%p)\n",
+                 nfss, nfss->fscache);
+        return;
+
+non_unique:
+        spin_unlock(&nfs_fscache_keys_lock);
+        kfree(key);
+        nfss->fscache_key = NULL;
+        nfss->fscache = NULL;
+        printk(KERN_WARNING "NFS:"
+               " Cache request denied due to non-unique superblock keys\n");
+}
+
+/*      
+ * Define the superblock object for FS-Cache.  This is used to describe a
+ * superblock object to fscache_acquire_cookie().  It is keyed by all the NFS
+ * parameters that might cause a separate superblock.
+ */
+const struct fscache_cookie_def nfs_fscache_super_index_def = {
+        .name           = "NFS.super",
+        .type           = FSCACHE_COOKIE_TYPE_INDEX,
+        .get_key        = nfs_super_get_key,
+};      
+
+/**             
+ * fscache_acquire_cookie - Acquire a cookie to represent a cache object
+ * @parent: The cookie that's to be the parent of this one
+ * @def: A description of the cache object, including callback operations
+ * @netfs_data: An arbitrary piece of data to be kept in the cookie to
+ * represent the cache object to the netfs
+ *      
+ * This function is used to inform FS-Cache about part of an index hierarchy
+ * that can be used to locate files.  This is done by requesting a cookie for
+ * each index in the path to the file.
+ *      
+ * See Documentation/filesystems/caching/netfs-api.txt for a complete
+ * description.
+ */     
+static inline
+struct fscache_cookie *fscache_acquire_cookie( 
+        struct fscache_cookie *parent,         
+        const struct fscache_cookie_def *def,
+        void *netfs_data)
+{       
+        // def = &nfs_fscache_super_index_def
+        if (fscache_cookie_valid(parent))
+                return __fscache_acquire_cookie(parent, def, netfs_data);
+        else
+                return NULL;
+}       
+
+#define fscache_cookie_valid(cookie) (cookie)
+
+/*
+ * request a cookie to represent an object (index, datafile, xattr, etc)
+ * - parent specifies the parent object
+ *   - the top level index cookie for each netfs is stored in the fscache_netfs
+ *     struct upon registration
+ * - def points to the definition
+ * - the netfs_data will be passed to the functions pointed to in *def
+ * - all attached caches will be searched to see if they contain this object
+ * - index objects aren't stored on disk until there's a dependent file that
+ *   needs storing
+ * - other objects are stored in a selected cache immediately, and all the
+ *   indices forming the path to it are instantiated if necessary
+ * - we never let on to the netfs about errors
+ *   - we may set a negative cookie pointer, but that's okay
+ */
+struct fscache_cookie *__fscache_acquire_cookie(
+        struct fscache_cookie *parent,
+        const struct fscache_cookie_def *def,
+        void *netfs_data)
+{
+        struct fscache_cookie *cookie;
+
+        BUG_ON(!def);
+
+        _enter("{%s},{%s},%p",
+               parent ? (char *) parent->def->name : "<no-parent>",
+               def->name, netfs_data);
+
+        fscache_stat(&fscache_n_acquires);
+
+        /* if there's no parent cookie, then we don't create one here either */
+        if (!parent) {
+                fscache_stat(&fscache_n_acquires_null);
+                _leave(" [no parent]");
+                return NULL;
+        }
+
+        /* validate the definition */
+        BUG_ON(!def->get_key);
+        BUG_ON(!def->name[0]);
+
+        BUG_ON(def->type == FSCACHE_COOKIE_TYPE_INDEX &&
+               parent->def->type != FSCACHE_COOKIE_TYPE_INDEX);
+
+        /* allocate and initialise a cookie */
+        cookie = kmem_cache_alloc(fscache_cookie_jar, GFP_KERNEL);
+        // request a cookie
+        // 创建一个 cookie to represent a cacahe object
+
+        atomic_set(&cookie->usage, 1);
+        atomic_set(&cookie->n_children, 0);
+
+        atomic_inc(&parent->usage);
+        atomic_inc(&parent->n_children);
+
+        cookie->def             = def;
+        // struct fscache_cookie 结构中 const struct fscache_cookie_def *def;           /* definition */  
+
+        cookie->parent          = parent;
+        // struct fscache_cookie           *parent;        /* parent of this entry */`
+
+        cookie->netfs_data      = netfs_data;
+        cookie->flags           = 0;
+
+        /* radix tree insertion won't use the preallocation pool unless it's
+         * told it may not wait */
+        INIT_RADIX_TREE(&cookie->stores, GFP_NOFS & ~__GFP_WAIT);
+
+        switch (cookie->def->type) {
+        case FSCACHE_COOKIE_TYPE_INDEX:
+                fscache_stat(&fscache_n_cookie_index);
+                break;
+        case FSCACHE_COOKIE_TYPE_DATAFILE:
+                fscache_stat(&fscache_n_cookie_data);
+                break;
+        default:
+                fscache_stat(&fscache_n_cookie_special);
+                break;
+        }
+
+        /* if the object is an index then we need do nothing more here - we
+         * create indices on disk when we need them as an index may exist in
+         * multiple caches */
+        if (cookie->def->type != FSCACHE_COOKIE_TYPE_INDEX) {
+                if (fscache_acquire_non_index_cookie(cookie) < 0) {
+                        atomic_dec(&parent->n_children);
+                        __fscache_cookie_put(cookie);
+                        fscache_stat(&fscache_n_acquires_nobufs);
+                        _leave(" = NULL");
+                        return NULL;
+                }
+        }
+
+        fscache_stat(&fscache_n_acquires_ok);
+        _leave(" = %p", cookie);
+        return cookie;
+}
+
+/*
+ * get an NFS2/NFS3 root dentry from the root filehandle
+ */
+struct dentry *nfs_get_root(struct super_block *sb, struct nfs_fh *mntfh)
+{
+        struct nfs_server *server = NFS_SB(sb);
+        struct nfs_fsinfo fsinfo;
+        struct dentry *ret;
+        struct inode *inode;
+        int error;
+
+        /* get the actual root for this mount */
+        fsinfo.fattr = nfs_alloc_fattr();
+        if (fsinfo.fattr == NULL)
+                return ERR_PTR(-ENOMEM);
+
+        error = server->nfs_client->rpc_ops->getroot(server, mntfh, &fsinfo);
+        if (error < 0) {
+                dprintk("nfs_get_root: getattr error = %d\n", -error);
+                ret = ERR_PTR(error);
+                goto out;
+        }
+
+        inode = nfs_fhget(sb, mntfh, fsinfo.fattr);
+        if (IS_ERR(inode)) {
+                dprintk("nfs_get_root: get root inode failed\n");
+                ret = ERR_CAST(inode);
+                goto out;
+        }
+
+        error = nfs_superblock_set_dummy_root(sb, inode);
+        // Set the superblock root dentry 
+
+        if (error != 0) {
+                ret = ERR_PTR(error);
+                goto out;
+        }
+
+        /* root dentries normally start off anonymous and get spliced in later
+         * if the dentry tree reaches them; however if the dentry already
+         * exists, we'll pick it up at this point and use it as the root
+         */
+        ret = d_obtain_alias(inode);
+        if (IS_ERR(ret)) {
+                dprintk("nfs_get_root: get root dentry failed\n");
+                goto out;
+        }
+
+        security_d_instantiate(ret, inode);
+
+        if (ret->d_op == NULL)
+                ret->d_op = server->nfs_client->rpc_ops->dentry_ops;
+out:
+        nfs_free_fattr(fsinfo.fattr);
+        return ret;
+}
+
+/*
+ * This is our front-end to iget that looks up inodes by file handle
+ * instead of inode number.
+ */
+struct inode *
+nfs_fhget(struct super_block *sb, struct nfs_fh *fh, struct nfs_fattr *fattr)
+{       
+        struct nfs_find_desc desc = {
+                .fh     = fh,
+                .fattr  = fattr
+        }; 
+        struct inode *inode = ERR_PTR(-ENOENT);
+        unsigned long hash;
+                
+        if (((fattr->valid & NFS_ATTR_FATTR_FILEID) == 0) &&
+            !nfs_attr_use_mounted_on_fileid(fattr))
+                goto out_no_inode;
+        if ((fattr->valid & NFS_ATTR_FATTR_TYPE) == 0)
+                goto out_no_inode;
+                
+        hash = nfs_fattr_to_ino_t(fattr);
+        
+        inode = iget5_locked(sb, hash, nfs_find_actor, nfs_init_locked, &desc);
+        // 首先在 inode_hashtable 中查找是否有相应 inode,如果没有则创建 struct nfs_inode 结构中内嵌 struct inode vfs_inode  
+
+        if (inode == NULL) {
+                inode = ERR_PTR(-ENOMEM);
+                goto out_no_inode;
+        }       
+
+        if (inode->i_state & I_NEW) {
+                struct nfs_inode *nfsi = NFS_I(inode);
+                unsigned long now = jiffies;
+
+                /* We set i_ino for the few things that still rely on it,
+                 * such as stat(2) */
+                inode->i_ino = hash;
+
+                /* We can't support update_atime(), since the server will reset it */
+                inode->i_flags |= S_NOATIME|S_NOCMTIME;
+                inode->i_mode = fattr->mode;
+                if ((fattr->valid & NFS_ATTR_FATTR_MODE) == 0
+                                && nfs_server_capable(inode, NFS_CAP_MODE))
+                        nfsi->cache_validity |= NFS_INO_INVALID_ATTR
+                                | NFS_INO_INVALID_ACCESS
+                                | NFS_INO_INVALID_ACL;
+                /* Why so? Because we want revalidate for devices/FIFOs, and
+                 * that's precisely what we have in nfs_file_inode_operations.
+                 */
+                inode->i_op = NFS_SB(sb)->nfs_client->rpc_ops->file_inode_ops;
+                if (S_ISREG(inode->i_mode)) {
+                        inode->i_fop = &nfs_file_operations;
+                        inode->i_data.a_ops = &nfs_file_aops;
+                        inode->i_data.backing_dev_info = &NFS_SB(sb)->backing_dev_info;
+                } else if (S_ISDIR(inode->i_mode)) {
+                        inode->i_op = NFS_SB(sb)->nfs_client->rpc_ops->dir_inode_ops;
+                        inode->i_fop = &nfs_dir_operations;
+                        set_ext_aops(&inode->i_data, &nfs_dir_aops);
+                        if (nfs_server_capable(inode, NFS_CAP_READDIRPLUS))
+                                set_bit(NFS_INO_ADVISE_RDPLUS, &NFS_I(inode)->flags);
+                        /* Deal with crossing mountpoints */
+                        if ((fattr->valid & NFS_ATTR_FATTR_FSID)
+                                        && !nfs_fsid_equal(&NFS_SB(sb)->fsid, &fattr->fsid)) {
+                                if (fattr->valid & NFS_ATTR_FATTR_V4_REFERRAL)
+                                        inode->i_op = &nfs_referral_inode_operations;
+                                else
+                                        inode->i_op = &nfs_mountpoint_inode_operations;
+                                inode->i_fop = NULL;
+                                inode->i_flags |= S_AUTOMOUNT;
+                        }
+                } else if (S_ISLNK(inode->i_mode))
+                        inode->i_op = &nfs_symlink_inode_operations;
+                else
+                        init_special_inode(inode, inode->i_mode, fattr->rdev);
+
+                memset(&inode->i_atime, 0, sizeof(inode->i_atime));
+                memset(&inode->i_mtime, 0, sizeof(inode->i_mtime));
+                memset(&inode->i_ctime, 0, sizeof(inode->i_ctime));
+                nfsi->change_attr = 0;
+                inode->i_size = 0;
+                inode->i_nlink = 0;
+                inode->i_uid = -2;
+                inode->i_gid = -2;
+                inode->i_blocks = 0;
+                memset(nfsi->cookieverf, 0, sizeof(nfsi->cookieverf));
+
+                nfsi->read_cache_jiffies = fattr->time_start;
+                nfsi->attr_gencount = fattr->gencount;
+                if (fattr->valid & NFS_ATTR_FATTR_ATIME)
+                        inode->i_atime = fattr->atime;
+                else if (nfs_server_capable(inode, NFS_CAP_ATIME))
+                        nfsi->cache_validity |= NFS_INO_INVALID_ATTR;
+                if (fattr->valid & NFS_ATTR_FATTR_MTIME)
+                        inode->i_mtime = fattr->mtime;
+                else if (nfs_server_capable(inode, NFS_CAP_MTIME))
+                        nfsi->cache_validity |= NFS_INO_INVALID_ATTR
+                                | NFS_INO_INVALID_DATA;
+                if (fattr->valid & NFS_ATTR_FATTR_CTIME)
+                        inode->i_ctime = fattr->ctime;
+                else if (nfs_server_capable(inode, NFS_CAP_CTIME))
+                        nfsi->cache_validity |= NFS_INO_INVALID_ATTR
+                                | NFS_INO_INVALID_ACCESS
+                                | NFS_INO_INVALID_ACL;
+                if (fattr->valid & NFS_ATTR_FATTR_CHANGE)
+                        nfsi->change_attr = fattr->change_attr;
+                else if (nfs_server_capable(inode, NFS_CAP_CHANGE_ATTR))
+                        nfsi->cache_validity |= NFS_INO_INVALID_ATTR
+                                | NFS_INO_INVALID_DATA;
+                if (fattr->valid & NFS_ATTR_FATTR_SIZE)
+                        inode->i_size = nfs_size_to_loff_t(fattr->size);
+                else
+                        nfsi->cache_validity |= NFS_INO_INVALID_ATTR
+                                | NFS_INO_INVALID_DATA
+                                | NFS_INO_REVAL_PAGECACHE;
+                if (fattr->valid & NFS_ATTR_FATTR_NLINK)
+                        inode->i_nlink = fattr->nlink;
+                else if (nfs_server_capable(inode, NFS_CAP_NLINK))
+                        nfsi->cache_validity |= NFS_INO_INVALID_ATTR;
+                if (fattr->valid & NFS_ATTR_FATTR_OWNER)
+                        inode->i_uid = fattr->uid;
+                else if (nfs_server_capable(inode, NFS_CAP_OWNER))
+                        nfsi->cache_validity |= NFS_INO_INVALID_ATTR
+                                | NFS_INO_INVALID_ACCESS
+                                | NFS_INO_INVALID_ACL;
+                if (fattr->valid & NFS_ATTR_FATTR_GROUP)
+                        inode->i_gid = fattr->gid;
+                else if (nfs_server_capable(inode, NFS_CAP_OWNER_GROUP))
+                        nfsi->cache_validity |= NFS_INO_INVALID_ATTR
+                                | NFS_INO_INVALID_ACCESS
+                                | NFS_INO_INVALID_ACL;
+                if (fattr->valid & NFS_ATTR_FATTR_BLOCKS_USED)
+                        inode->i_blocks = fattr->du.nfs2.blocks;
+                if (fattr->valid & NFS_ATTR_FATTR_SPACE_USED) {
+                        /*
+                         * report the blocks in 512byte units
+                         */
+                        inode->i_blocks = nfs_calc_block_size(fattr->du.nfs3.used);
+                }
+                nfsi->attrtimeo = NFS_MINATTRTIMEO(inode);
+                nfsi->attrtimeo_timestamp = now;
+                nfsi->access_cache = RB_ROOT;
+
+                nfs_fscache_init_inode_cookie(inode);
+
+                unlock_new_inode(inode);
+        } else
+                nfs_refresh_inode(inode, fattr);
+        dprintk("NFS: nfs_fhget(%s/%Ld ct=%d)\n",
+                inode->i_sb->s_id,
+                (long long)NFS_FILEID(inode),
+                atomic_read(&inode->i_count));
+
+out:
+        return inode;
+
+out_no_inode:
+        dprintk("nfs_fhget: iget failed with error %ld\n", PTR_ERR(inode));
+        goto out;
+}
+
+
+const struct address_space_operations nfs_file_aops = {
+        .readpage = nfs_readpage,
+        .readpages = nfs_readpages,
+        .set_page_dirty = __set_page_dirty_nobuffers,
+        .writepage = nfs_writepage,
+        .writepages = nfs_writepages,
+        .write_begin = nfs_write_begin,
+        .write_end = nfs_write_end,
+        .invalidatepage = nfs_invalidate_page,
+        .releasepage = nfs_release_page,
+        .direct_IO = nfs_direct_IO,
+        .migratepage = nfs_migrate_page,
+        .launder_page = nfs_launder_page,
+        .error_remove_page = generic_error_remove_page,
+};
+
+
+/*
+ * Set the superblock root dentry.
+ * Note that this function frees the inode in case of error.
+ */
+static int nfs_superblock_set_dummy_root(struct super_block *sb, struct inode *inode)
+{
+        /* The mntroot acts as the dummy root dentry for this superblock */
+        if (sb->s_root == NULL) {
+                sb->s_root = d_alloc_root(inode);
+                // 创建 dentry 结构 给跟目录
+
+                if (sb->s_root == NULL) {
+                        iput(inode);
+                        return -ENOMEM;
+                }
+                /* Circumvent igrab(): we know the inode is not being freed */
+                atomic_inc(&inode->i_count);
+                /*
+                 * Ensure that this dentry is invisible to d_find_alias().
+                 * Otherwise, it may be spliced into the tree by
+                 * d_materialise_unique if a parent directory from the same
+                 * filesystem gets mounted at a later time.
+                 * This again causes shrink_dcache_for_umount_subtree() to
+                 * Oops, since the test for IS_ROOT() will fail.
+                 */
+                spin_lock(&dcache_lock);
+                list_del_init(&sb->s_root->d_alias);
+                spin_unlock(&dcache_lock);
+        }
+        return 0;
+}
