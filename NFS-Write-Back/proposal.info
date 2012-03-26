@@ -326,3 +326,9 @@ already_registered:
 
 backend-api: This API is declared in <linux/fscache-cache.h>
 front-api:                           <linux/fscache.h>
+
+当 client 端读取一个文件的时候，nfs 会调用 fscache 的 API 实现缓存操作，缓存到 /var/cache/fscache/cache 下
+当 client 写一个文件时，不会发生缓存操作。
+
+当 client 挂在 server export 出的目录到本地时(假设挂载到 /mnt下)，那此时在本地 ll /mnt 显示的内容（目录和文件的信息）都因该保存在本地的内存中，并且如果在 client 端读取 server 端的一个文件时，对应该文件的内容会被 nfs 缓存到内存中，也同时会被 fscache 缓存到本地
+
