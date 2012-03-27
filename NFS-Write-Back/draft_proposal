@@ -1,3 +1,5 @@
+Application for Google Summer of Code 2012: Dong Zhu
+
 Contact Information
 
 Email Address: bluezhudong@gmail.com
@@ -16,16 +18,18 @@ Second: The Fedora Project is a worldwide community,I am eager to participate it
 Third: I have great interesting in opensource,especially Fedora Project 
 
 Do you have any past involvement with the Fedora project or another open source project as a contributor?
-I am intern working in Redhat as a kernel-qe for almost one year,I test/report many bugs and write automatic testcases on RHEL.On the other hand I also read the kernel source code.
+I am intern working in Redhat as a kernel-qe for almost one year,I test/report many bugs and write a large number of automatic testcases on RHEL.On the other hand I also read the kernel source code,then write some related patch to test the kernel.
 
 Did you participate with the past GSoC programs, if so which years, which organizations?
 No
 
 Will you continue contributing/ supporting the Fedora project after the GSoC 2012 program, if yes, which team(s), you are interested with?
-Of course.I am interested in Linux kernel,I am looking forward to submit patch to the fedora-devel. I think I can contribute to fedora project according to my knowledge
+Yes,Of course.I am crazy interested in Linux kernel,I am looking forward to submit patch to the fedora-devel. I think I can contribute to fedora project according to my knowledge
 
 Why should we choose you over other applicants?
-I have knowledge of Linux and the linux kernel.I am familiar with Filesystem,USB driver,Power-Management,Timer
+I have knowledge of Linux and the linux kernel.I am familiar with Filesystem,USB driver,Power-Management,Timer,Interrupt,Mem.
+I have experience analyzing and debugging Linux kernel source code,I can write some related kernel module by myself.
+I experience working in OpenSource.
 
 Proposal Description
 
@@ -43,11 +47,20 @@ Please describe your proposal in detail. Include:
 
 * Any other details you feel we should consider
 
-NFS only supports write through cache based on fscache/cachefiles,the goal is adding a new feature implement a writeback mechanism for nfs
+Project:
+NFS only supports write through cache based on fscache/cachefiles,the goal is adding a new feature that implement a writeback mechanism for nfs.
 
-I am good at C/shell Programming and familiar with the Linux kernel/nfs
+Expericnce:
+I am good at C/shell Programming and familiar with the Linux kernel/nfs,and I have experience working for OpenSource.
 
-I am familiar with ext2 filesystems and know the implemention of it through reading the source code.So I am very familiar with the mechanism of cache (indoe cache,dentry cache,address_space).I also have the experiecnce of developering the kernel mode.
+I worked in redhat for almost one year and write many testcases(C && shell)
+
+I am familiar with ext2 filesystems and know the implemention of it through reading the source code.So I am very familiar with the mechanism of cache (indoe cache,dentry cache,address_space).I also have the experiecnce of developering the kernel module.
+
+Implemention
+First I think I need to read the fscache source code and familiar with the APIs
+then investigate nfs fscache and cachefiles implementation and a knowledge of write through
+at last modify the fscache and cachefiles modules to add some necessary APIs to implement the write back without breaking the NFS specific close-to-open semantics.
 
 Time line:
 From April 23 to May 21 : starting read the doc Documentation/filesystems/caching/,read the fscache code,and familiar with the API,knowledge in nfs->fscache->cachefiles,investigate nfs and fscache,cachefiles implementation
@@ -55,6 +68,12 @@ From May 22             : have knowledge in the write-back mechanism,starting De
 July 13                 : submitting mid-term evaluations
 Before August 27        : Finish developing and re-compile the related of nfs kernel module ,test it and check whether it works well.
 August 31               : Submit required code samples to Google
+
+Roadmap
+1. Publish my goals to the community and try to get some feedback and suggestions on my plans. I will get familiar with the that I require for my work. For testing, I will get an ARM board. (until early June)
+2. Talk with the community about the basic layout of source code for ARM and implement it.(until late July)
+3. Port coreboot to Marvell ARM SOC with PCIe support. (until beginning of August)
+4. Testing features with the community of Coreboot. This will begin as soon as the basic layout of source code is finished and should be completed by the end of August. 
 
 Have you communicated with a potential mentor? If so, who?
 Mentor   : Tao Peng
