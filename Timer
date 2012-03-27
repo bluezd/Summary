@@ -2997,6 +2997,22 @@ timer_interrupt() 时钟中断处理程序
 	                                                           --> tick_handle_periodic()   CPU-0 经测试
 								       --> tick_periodic()
 
+Red Hat Enterprise Linux 6 kernels operate the HPET timer device in 'one shot' mode (as opposed to periodic mode) to implement timer ticks with variable length intervals. The kernel reads the HPET main counter register, adds a delta and writes the resulting value to a comparator register. The HPET timer device shall generate an interrupt when the main counter reaches the value in the comparator register.
+ 
+There is a possibility that the main counter is already beyond the resulting value at the time when the value is written to the comparator register. The kernel takes precautions to detect this condition. However, these precautions seem to miss some particular scenarios that are possible with certain HPET implementations.
+
+If this condition is not detected, the HPET main counter needs to 'wrap around' in order to reach the value in the comparator register. In HPET 32-bit mode this can take close to 4294967295 cycles, which is roughly equivalent to 5 minutes (at a HPET counter frequency of 14.318180 MHz). During this period it is possible that kernel timers that depend on HPET interrupts do not expire as expected, which can cause adverse effects on performance.
+
+Disabling the HPET timer device may work around the issue on systems that also have a PIT timer device. If the parameter 'hpet=disable' is specified on the kernel command line (for example, in grub.conf) the kernel may alternatively use PIT interrupts to drive the 'global clock event'.
+
+Since the PIT timer device has a lower resolution than the HPET timer device, this change can have some impact on scheduling 'kernel high resolution timers', for example, during periods of low workload where the 'intel_idle' module may decide to 'shut down' CPU-local clock event devices (APIC timers).
+
+Another side effect of disabling the HPET timer device is that it can no longer be used as a clocksource. If, for example, the kernel detects an unstable TSC that should not be used as a clocksource, it attempts to switch to another available clocksource.
+
+However, if HPET is not available, a lower-resolution clocksource such as ACPI PM may be selected. This can have an impact on the resolution of time values returned by some library functions, for example, clock_gettime().
+
+
+
 /*              
  * Event handler for periodic ticks
  */             
