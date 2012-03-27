@@ -10,12 +10,10 @@ Blog URL: http://bluezd.info
 
 Freenode IRC Nick: bluezd
 
-NOTE: We require all students to blog about the progress of their project. You are strongly encouraged to register on the Freenode network and participate in our IRC channels. For more nformation and other instructions, see: http://groups.google.com/group/redhat-summer/web/gsoc-getting-started
-
 Why do you want to work with the Fedora Project?
-First: I am a fedora user.
+First: I am a fedora user,I use the fedora 15 as my Desktop os now.
 Second: The Fedora Project is a worldwide community,I am eager to participate it and make contribute for it.
-Third: I have great interesting in opensource,especially Fedora Project 
+Third: I have great interesting in opensource,especially Fedora Project. 
 
 Do you have any past involvement with the Fedora project or another open source project as a contributor?
 I am intern working in Redhat as a kernel-qe for almost one year,I test/report many bugs and write a large number of automatic testcases on RHEL.On the other hand I also read the kernel source code,then write some related patch to test the kernel.
@@ -24,7 +22,7 @@ Did you participate with the past GSoC programs, if so which years, which organi
 No
 
 Will you continue contributing/ supporting the Fedora project after the GSoC 2012 program, if yes, which team(s), you are interested with?
-Yes,Of course.I am crazy interested in Linux kernel,I am looking forward to submit patch to the fedora-devel. I think I can contribute to fedora project according to my knowledge
+Yes,Of course.I am crazy interested in Linux kernel,filesystem,Power-Management,Timer,Interrupt,I am looking forward to submit patch to the fedora-devel. I think I can contribute to fedora project according to my knowledge.
 
 Why should we choose you over other applicants?
 I have knowledge of Linux and the linux kernel.I am familiar with Filesystem,USB driver,Power-Management,Timer,Interrupt,Mem.
@@ -33,48 +31,35 @@ I experience working in OpenSource.
 
 Proposal Description
 
-Please describe your proposal in detail. Include:
+Synopsis:
+I will implement the writeback mechanism for nfs during the summer,I will spend 8 hours a day to work for my project at least.
 
-* An overview of your proposal
-
-* The need you believe it fulfills
-
-* Any relevant experience you have
-
-* How you intend to implement your proposal
-
-* A rough timeline for your progress
-
-* Any other details you feel we should consider
+Biograph:
+I am a student from DaLian,China(timezone:GMT+8),23 years old,I am crazy about the OpenSource especially the Linux kernel.
 
 Project:
 NFS only supports write through cache based on fscache/cachefiles,the goal is adding a new feature that implement a writeback mechanism for nfs.
 
-Expericnce:
-I am good at C/shell Programming and familiar with the Linux kernel/nfs,and I have experience working for OpenSource.
+Profit for writeback mechanism
+Add a new feature of the fscache,Meet the needs of different people,can satisfy the requrements from different people,and the customer will benefit from it.
 
-I worked in redhat for almost one year and write many testcases(C && shell)
+Experience:
+I am good at C/shell Programming and familiar with the Linux kernel/nfs.
 
-I am familiar with ext2 filesystems and know the implemention of it through reading the source code.So I am very familiar with the mechanism of cache (indoe cache,dentry cache,address_space).I also have the experiecnce of developering the kernel module.
+I worked for redhat for almost one year and write many testcases(C && shell),I have experience working for OpenSource.
 
-Implemention
-First I think I need to read the fscache source code and familiar with the APIs
-then investigate nfs fscache and cachefiles implementation and a knowledge of write through
-at last modify the fscache and cachefiles modules to add some necessary APIs to implement the write back without breaking the NFS specific close-to-open semantics.
+I am familiar with extX filesystems and know the implementation of it by reading the source code.So I am very familiar with the mechanism of cache (indoe cache,dentry cache,address_space).I also have the experiecnce of developering the kernel module.
 
-Time line:
-From April 23 to May 21 : starting read the doc Documentation/filesystems/caching/,read the fscache code,and familiar with the API,knowledge in nfs->fscache->cachefiles,investigate nfs and fscache,cachefiles implementation
-From May 22             : have knowledge in the write-back mechanism,starting Development(add support for necessary APIs to implement the write back)
-July 13                 : submitting mid-term evaluations
-Before August 27        : Finish developing and re-compile the related of nfs kernel module ,test it and check whether it works well.
-August 31               : Submit required code samples to Google
+Implementation:
+1.First I think I need to read the fscache source code and familiar with the fscache APIs,such as fscache_read_or_alloc_page,To figure out the implementation of the nfs make use of the FS-cache facilities.
+2.Then investigate nfs fscache and cachefiles implementation and a knowledge of write through.
+3.At last modify the fscache and cachefiles modules to add some necessary APIs to implement the write back without breaking the NFS specific close-to-open semantics.
 
-Roadmap
-1. Publish my goals to the community and try to get some feedback and suggestions on my plans. I will get familiar with the that I require for my work. For testing, I will get an ARM board. (until early June)
-2. Talk with the community about the basic layout of source code for ARM and implement it.(until late July)
-3. Port coreboot to Marvell ARM SOC with PCIe support. (until beginning of August)
-4. Testing features with the community of Coreboot. This will begin as soon as the basic layout of source code is finished and should be completed by the end of August. 
+Roadmap:
+1. Publish my goals to the community and try to get some feedback and suggestions on my plans. Then I will get familiar with nfs->fscachethe->cachefiles that I require for my work. (maybe until early June)
+2. Discuss with the community and the mentor about the write  back and implement it.(until July)
+3. Implement the writeback mechanism. (Before August)
+4. Finish developing and re-compile the related of nfs kernel module (nfs,fscache,cacahefiles),test it and check whether it works well. 
 
-Have you communicated with a potential mentor? If so, who?
 Mentor   : Tao Peng
 Contacts : bergwolf@gmail.com
