@@ -45,6 +45,8 @@ This Project can satisfy the requrements from different people,and the customer 
 1.Reduce network loading by diverting repeat reads to local storage.
 2.Reduce the latency of slow network links by diverting repeat reads to local storage.
 
+Write-back caching yields somewhat better performance than write-through caching because it reduces the number of write operations to main memory. With this performance improvement comes a slight risk that data may be lost if the system crashes. 
+
 
 Experience:
 I am good at C/shell Programming and familiar with the Linux kernel/nfs.
@@ -58,8 +60,17 @@ Implementation:
 2.Then investigate nfs fscache and cachefiles implementation and have a knowledge of write through.
 3.At last modify some related modules(list blow) to add some necessary APIs to implement the write back caceh without breaking the NFS specific close-to-open semantics.This step is devided into some clear steps.My efforts will be separated into several tasks to complete.
   1) NFS:implement the front-end APIs,nfs could use the APIs to cache files on local disk through write back.
-  2) Fs-cache:implement the back-end APIs,
+     Add some necessary APIs into NFS:
+     nfs_writepage()
+  2) Fs-cache:implement the back-end APIs
+     Implement the APIs which add in NFS.
+     when client generate a write request,then nfs invoke the fscache API to cache the data into local disk.
   3) Cachefiles: caching the page in local disk
+     Also need add some back-end API to implement write the cache into loccal disk.
+  4) Client modify the file which we have cached for it .Need add API into to make the client just modify copy data in cache.
+  5) At last Need to add the sync mechanism to sync with original file which locate in remote server.
+
+When Client have a write request and modify a file,first the fscache will cache the data of the file into local disk,then just modify the cache,when customer finished modifying it,the cache will sync with the file which in remote server. 
 
 Roadmap:
 1. Publish my goals to the community and try to get some feedback and suggestions on my plans. Then I will get familiar with nfs->fscachethe->cachefiles that I require for my work. (maybe until early May)
