@@ -25,7 +25,7 @@ Will you continue contributing/ supporting the Fedora project after the GSoC 201
 Yes,Of course.I am crazy interested in Linux kernel,filesystem,Power-Management,Timer,Interrupt,I am looking forward to submit patch to the fedora-devel. I think I can contribute to fedora project according to my knowledge.
 
 Why should we choose you over other applicants?
-I have knowledge of Linux and the linux kernel.I am familiar with Filesystem,USB driver,Power-Management,Timer,Interrupt,Mem.
+I have knowledge of Linux and the linux kernel.I am familiar with Filesystem,USB driver,Power-Management,Timer,Interrupt,Mem,etc.
 I have experience analyzing and debugging Linux kernel source code,I can write some related kernel module by myself.
 I experience working in OpenSource.
 
@@ -41,7 +41,10 @@ Project:
 NFS only supports write through cache based on fscache/cachefiles,the goal is adding a new feature that implement a writeback mechanism for nfs.
 
 Profit for writeback mechanism
-Add a new feature of the fscache,Meet the needs of different people,can satisfy the requrements from different people,and the customer will benefit from it.
+This Project can satisfy the requrements from different people,and the customer will benefit from it.
+1.Reduce network loading by diverting repeat reads to local storage.
+2.Reduce the latency of slow network links by diverting repeat reads to local storage.
+
 
 Experience:
 I am good at C/shell Programming and familiar with the Linux kernel/nfs.
@@ -51,13 +54,16 @@ I worked for redhat for almost one year and write many testcases(C && shell),I h
 I am familiar with extX filesystems and know the implementation of it by reading the source code.So I am very familiar with the mechanism of cache (indoe cache,dentry cache,address_space).I also have the experiecnce of developering the kernel module.
 
 Implementation:
-1.First I think I need to read the fscache source code and familiar with the fscache APIs,such as fscache_read_or_alloc_page,To figure out the implementation of the nfs make use of the FS-cache facilities.
-2.Then investigate nfs fscache and cachefiles implementation and a knowledge of write through.
-3.At last modify the fscache and cachefiles modules to add some necessary APIs to implement the write back without breaking the NFS specific close-to-open semantics.
+1.First I think I need to read the nfs,fscache and cachefiles source code and familiar with the fscache APIs,such as fscache_read_or_alloc_page,To figure out the implementation of the nfs make use of the FS-cache facilities.
+2.Then investigate nfs fscache and cachefiles implementation and have a knowledge of write through.
+3.At last modify some related modules(list blow) to add some necessary APIs to implement the write back caceh without breaking the NFS specific close-to-open semantics.This step is devided into some clear steps.My efforts will be separated into several tasks to complete.
+  1) NFS:implement the front-end APIs,nfs could use the APIs to cache files on local disk through write back.
+  2) Fs-cache:implement the back-end APIs,
+  3) Cachefiles: caching the page in local disk
 
 Roadmap:
-1. Publish my goals to the community and try to get some feedback and suggestions on my plans. Then I will get familiar with nfs->fscachethe->cachefiles that I require for my work. (maybe until early June)
-2. Discuss with the community and the mentor about the write  back and implement it.(until July)
+1. Publish my goals to the community and try to get some feedback and suggestions on my plans. Then I will get familiar with nfs->fscachethe->cachefiles that I require for my work. (maybe until early May)
+2. Discuss with the community and the mentor about the write  back and implement it.(until early June)
 3. Implement the writeback mechanism. (Before August)
 4. Finish developing and re-compile the related of nfs kernel module (nfs,fscache,cacahefiles),test it and check whether it works well. 
 
