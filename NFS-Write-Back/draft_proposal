@@ -65,7 +65,7 @@ Roadmap:
 1. Publish my goals to the community and try to get some feedback and suggestions on my plans. Then I will get familiar with nfs->fscachethe->cachefiles that I require for my work. (maybe until early May)
 2. Discuss with the community and the mentor about the write  back and implement it.(until early June)
 3. Implement the writeback mechanism. (Before August)
-4. Finish developing and re-compile the related of nfs kernel module (nfs,fscache,cacahefiles),test it and check whether it works well. 
+4. Finish developing and re-compile the related of nfs kernel module (nfs,fscache,cacahefiles),test it and check whether it works well by the end of August.
 
 Mentor   : Tao Peng
 Contacts : bergwolf@gmail.com
