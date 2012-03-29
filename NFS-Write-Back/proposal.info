@@ -427,6 +427,8 @@ vfs_kern_mount(struct file_system_type *type, int flags, const char *name, void 
 	// mnt_mountpoint 指向这个文件系统安装点目录的 dentry
 	
         mnt->mnt_parent = mnt;
+	// 父文件系统，这个文件系统安装其上
+	
         up_write(&mnt->mnt_sb->s_umount);
         free_secdata(secdata);
         return mnt;
@@ -1242,3 +1244,93 @@ static int nfs_superblock_set_dummy_root(struct super_block *sb, struct inode *i
         }
         return 0;
 }
+
+
+
+---------------------------------------- 8< ----------------------------------------------------
+fs/read_write.c
+
+SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
+                size_t, count)
+{      
+        struct file *file;
+        ssize_t ret = -EBADF;
+        int fput_needed;
+
+        file = fget_light(fd, &fput_needed);
+        if (file) {
+                loff_t pos = file_pos_read(file);
+                ret = vfs_write(file, buf, count, &pos);
+                file_pos_write(file, pos);
+                fput_light(file, fput_needed);
+        }
+       
+        return ret;
+}
+
+
+const struct file_operations nfs_file_operations = {
+        .llseek         = nfs_file_llseek,
+        .read           = do_sync_read,
+        .write          = do_sync_write,
+        .aio_read       = nfs_file_read,
+        .aio_write      = nfs_file_write,
+        .mmap           = nfs_file_mmap,
+        .open           = nfs_file_open,
+        .flush          = nfs_file_flush,
+        .release        = nfs_file_release,
+        .fsync          = nfs_file_fsync,
+        .lock           = nfs_lock,
+        .flock          = nfs_flock,
+        .splice_read    = nfs_file_splice_read,
+        .splice_write   = nfs_file_splice_write,
+        .check_flags    = nfs_check_flags,
+        .setlease       = nfs_setlease,
+};
+
+
+vfs_write()
+ -> file->f_op->write()
+    do_sync_write()
+      -> filp->f_op->aio_write()
+         nfs_file_write()
+           -> generic_file_aio_write()
+                -> __generic_file_aio_write()
+                    -> generic_file_buffered_write()
+
+ssize_t
+generic_file_buffered_write(struct kiocb *iocb, const struct iovec *iov,
+                unsigned long nr_segs, loff_t pos, loff_t *ppos,
+                size_t count, ssize_t written)
+{
+        struct file *file = iocb->ki_filp;
+        struct address_space *mapping = file->f_mapping;
+        // 指向要写入文件的 indode 结构的 i_data(struct address_space)
+        // 其中的 i_data a_ops = &nfs_file_aops
+
+        ssize_t status;
+        struct iov_iter i;
+
+        iov_iter_init(&i, iov, nr_segs, count, written);
+        status = generic_perform_write(file, &i, pos);
+
+        if (likely(status >= 0)) {
+                written += status;
+                *ppos = pos + status;
+        }
+
+        /*
+         * If we get here for O_DIRECT writes then we must have fallen through
+         * to buffered writes (block instantiation inside i_size).  So we sync
+         * the file data here, to try to honour O_DIRECT expectations.
+         */
+        if (unlikely(file->f_flags & O_DIRECT) && written)
+                status = filemap_write_and_wait_range(mapping,
+                                        pos, pos + written - 1);
+
+        return written ? written : status;
+}
+
+generic_perform_write
+  -> a_ops->write_begin()
+      ->  

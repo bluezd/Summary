@@ -40,41 +40,41 @@ I am a student from DaLian,China(timezone:GMT+8),23 years old,I am crazy about t
 Project:
 NFS only supports write through cache based on fscache/cachefiles,the goal is adding a new feature that implement a writeback mechanism for nfs.
 
-Profit for writeback mechanism
-This Project can satisfy the requrements from different people,and the customer will benefit from it.
-1.Reduce network loading by diverting repeat reads to local storage.
-2.Reduce the latency of slow network links by diverting repeat reads to local storage.
-
-Write-back caching yields somewhat better performance than write-through caching because it reduces the number of write operations to main memory. With this performance improvement comes a slight risk that data may be lost if the system crashes. 
-
+Profit for writeback mechanism:
+This Project can satisfy the requrements from different people.
+1.Write back caches improve performance, because a write to the local cache is faster than to normal remote server through the network. 
+2.Reduce network loading by diverting repeat writes to local storage.
+3.It also reduces the number of write operations to the remote server.
 
 Experience:
 I am good at C/shell Programming and familiar with the Linux kernel/nfs.
-
 I worked for redhat for almost one year and write many testcases(C && shell),I have experience working for OpenSource.
-
-I am familiar with extX filesystems and know the implementation of it by reading the source code.So I am very familiar with the mechanism of cache (indoe cache,dentry cache,address_space).I also have the experiecnce of developering the kernel module.
+I am familiar with extX/NFS filesystems and know the implementation of it by reading the source code.So I am very familiar with the mechanism of cache (indoe cache,dentry cache,address_space).I also have the experiecnce of developering the kernel module.
 
 Implementation:
 1.First I think I need to read the nfs,fscache and cachefiles source code and familiar with the fscache APIs,such as fscache_read_or_alloc_page,To figure out the implementation of the nfs make use of the FS-cache facilities.
 2.Then investigate nfs fscache and cachefiles implementation and have a knowledge of write through.
-3.At last modify some related modules(list blow) to add some necessary APIs to implement the write back caceh without breaking the NFS specific close-to-open semantics.This step is devided into some clear steps.My efforts will be separated into several tasks to complete.
-  1) NFS:implement the front-end APIs,nfs could use the APIs to cache files on local disk through write back.
-     Add some necessary APIs into NFS:
-     nfs_writepage()
-  2) Fs-cache:implement the back-end APIs
-     Implement the APIs which add in NFS.
-     when client generate a write request,then nfs invoke the fscache API to cache the data into local disk.
-  3) Cachefiles: caching the page in local disk
-     Also need add some back-end API to implement write the cache into loccal disk.
-  4) Client modify the file which we have cached for it .Need add API into to make the client just modify copy data in cache.
-  5) At last Need to add the sync mechanism to sync with original file which locate in remote server.
+3.Knowledge the difference between the write-through cache and write back cache,Familiar with the write back mechanism.
+4.At last modify some related modules(list blow) to add some necessary APIs to implement the write back cache without breaking the NFS specific close-to-open semantics.This step is devided into some clear steps.My efforts will be separated into several tasks to complete.
+  1) NFS:implement the front-end APIs,nfs could use the APIs to cache files on local disk through write back mechanism.
+      Add some necessary APIs into NFS:
+       * cache the "writes" locally
+           eg:add API into nfs_writepage(),when client generate a write request,then nfs invoke the fscache API to cache the data of the file.
+       * modify the locally cached file
+           eg:add API into nfs_writepage(),when client modify a file (which is cached locally by last step),so need to provide some APIs to make client just modifyting the locally cached file instead of the original file which locates in remote server.
 
-When Client have a write request and modify a file,first the fscache will cache the data of the file into local disk,then just modify the cache,when customer finished modifying it,the cache will sync with the file which in remote server. 
+  2) Fs-cache:implement the back-end APIs
+      Modify the fs-cache module to implement the APIs which are added in NFS.
+
+  3) Cachefiles: caching the page in local disk
+      Also need add some functions into this module to provide a interface to fs-cache.The fscache could use this interface to cache files.
+
+  4) At last Need to add the sync mechanism to sync with original file which locate in remote server.
+      when client finished modifying the file,the cache will sync with the file asynchronously which locates in remote server. 
 
 Roadmap:
 1. Publish my goals to the community and try to get some feedback and suggestions on my plans. Then I will get familiar with nfs->fscachethe->cachefiles that I require for my work. (maybe until early May)
-2. Discuss with the community and the mentor about the write  back and implement it.(until early June)
+2. Discuss with the community and the mentor about the write back mechanism.(until May mid-term)
 3. Implement the writeback mechanism. (Before August)
 4. Finish developing and re-compile the related of nfs kernel module (nfs,fscache,cacahefiles),test it and check whether it works well by the end of August.
 
