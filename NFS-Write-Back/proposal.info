@@ -1246,9 +1246,416 @@ static int nfs_superblock_set_dummy_root(struct super_block *sb, struct inode *i
 }
 
 
+---------------------------------------- 8< ---------------------------------------------------- 
+fs/read_write.c 
 
----------------------------------------- 8< ----------------------------------------------------
-fs/read_write.c
+SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+{
+        struct file *file;
+        ssize_t ret = -EBADF;
+        int fput_needed;
+
+        file = fget_light(fd, &fput_needed);
+        if (file) {
+                loff_t pos = file_pos_read(file);
+                ret = vfs_read(file, buf, count, &pos);
+                file_pos_write(file, pos);
+                fput_light(file, fput_needed);
+        }
+
+        return ret;
+}
+
+vfs_read()
+  -> file->f_op->read()
+     do_sync_read()
+       -> filp->f_op->aio_read()  
+          nfs_file_read()
+ 
+
+static ssize_t
+nfs_file_read(struct kiocb *iocb, const struct iovec *iov,
+                unsigned long nr_segs, loff_t pos)
+{
+        struct dentry * dentry = iocb->ki_filp->f_path.dentry;
+        struct inode * inode = dentry->d_inode;
+        ssize_t result;
+        size_t count = iov_length(iov, nr_segs);
+
+        if (iocb->ki_filp->f_flags & O_DIRECT)
+                return nfs_file_direct_read(iocb, iov, nr_segs, pos);
+
+        dprintk("NFS: read(%s/%s, %lu@%lu)\n",
+                dentry->d_parent->d_name.name, dentry->d_name.name,
+                (unsigned long) count, (unsigned long) pos);
+
+        result = nfs_revalidate_mapping(inode, iocb->ki_filp->f_mapping);
+        nfs_add_stats(inode, NFSIOS_NORMALREADBYTES, count);
+        if (!result)
+                result = generic_file_aio_read(iocb, iov, nr_segs, pos);
+        return result;
+}
+
+generic_file_aio_read()
+  -> do_generic_file_read() 
+       -> mapping->a_ops->readpage(filp, page)
+          nfs_readpage()
+
+/*
+ * Read a page over NFS.
+ * We read the page synchronously in the following case:
+ *  -   The error flag is set for this page. This happens only when a
+ *      previous async read operation failed.
+ */
+int nfs_readpage(struct file *file, struct page *page)
+{
+        struct nfs_open_context *ctx;
+        struct inode *inode = page->mapping->host;
+        int             error;
+
+        dprintk("NFS: nfs_readpage (%p %ld@%lu)\n",
+                page, PAGE_CACHE_SIZE, page->index);
+        nfs_inc_stats(inode, NFSIOS_VFSREADPAGE);
+        nfs_add_stats(inode, NFSIOS_READPAGES, 1);
+
+        /*
+         * Try to flush any pending writes to the file..
+         *      
+         * NOTE! Because we own the page lock, there cannot
+         * be any new pending writes generated at this point
+         * for this page (other pages can be written to).
+         */     
+        error = nfs_wb_page(inode, page);
+        if (error)              
+                goto out_unlock;
+        if (PageUptodate(page))
+                goto out_unlock;
+                
+        error = -ESTALE;
+        if (NFS_STALE(inode))
+                goto out_unlock;
+
+        if (file == NULL) {
+                error = -EBADF;
+                ctx = nfs_find_open_context(inode, NULL, FMODE_READ);
+                if (ctx == NULL)
+                        goto out_unlock;
+        } else
+                ctx = get_nfs_open_context(nfs_file_open_context(file));
+                // filp->private_data
+
+        if (!IS_SYNC(inode)) {
+                error = nfs_readpage_from_fscache(ctx, inode, page);
+                if (error == 0)
+                        goto out;
+        }
+
+        error = nfs_readpage_async(ctx, inode, page);
+
+out:
+        put_nfs_open_context(ctx);
+        return error;
+out_unlock:
+        unlock_page(page);
+        return error;
+}
+
+/*
+ * Write back all requests on one page - we do this before reading it.
+ */             
+int nfs_wb_page(struct inode *inode, struct page *page)
+{       
+        loff_t range_start = page_offset(page);
+        loff_t range_end = range_start + (loff_t)(PAGE_CACHE_SIZE - 1);
+        struct writeback_control wbc = {
+                .sync_mode = WB_SYNC_ALL,
+                .nr_to_write = 0,
+                .range_start = range_start,
+                .range_end = range_end,
+        };
+        int ret;
+        
+        for (;;) {
+                wait_on_page_writeback(page);
+                if (clear_page_dirty_for_io(page)) {
+                        ret = nfs_writepage_locked(page, &wbc);
+                        if (ret < 0)
+                                goto out_error;
+                        continue;
+                }
+                if (!PagePrivate(page))
+                        break;
+                ret = nfs_commit_inode(inode, FLUSH_SYNC);
+                if (ret < 0)
+                        goto out_error;
+        }
+        return 0;
+out_error:
+        return ret;
+}
+
+/*              
+ * Retrieve a page from an inode data storage object.
+ */     
+static inline int nfs_readpage_from_fscache(struct nfs_open_context *ctx,
+                                            struct inode *inode,
+                                            struct page *page)
+{       
+        if (NFS_I(inode)->fscache)
+                return __nfs_readpage_from_fscache(ctx, inode, page);
+        // struct nfs_inode
+        return -ENOBUFS;
+}
+
+/*
+ * nfs fs inode data in memory
+ */
+struct nfs_inode {
+
+        ......
+ 
+#ifdef CONFIG_NFS_FSCACHE
+        struct fscache_cookie   *fscache;
+#endif
+        struct inode            vfs_inode;
+
+};
+
+/*
+ * Retrieve a page from fscache 
+ */             
+int __nfs_readpage_from_fscache(struct nfs_open_context *ctx,
+                                struct inode *inode, struct page *page)
+{
+        int ret;
+
+        dfprintk(FSCACHE,
+                 "NFS: readpage_from_fscache(fsc:%p/p:%p(i:%lx f:%lx)/0x%p)\n",
+                 NFS_I(inode)->fscache, page, page->index, page->flags, inode);
+
+        ret = fscache_read_or_alloc_page(NFS_I(inode)->fscache,
+                                         page,
+                                         nfs_readpage_from_fscache_complete,
+                                         ctx,
+                                         GFP_KERNEL);
+
+        switch (ret) {
+        case 0: /* read BIO submitted (page in fscache) */
+                dfprintk(FSCACHE,
+                         "NFS:    readpage_from_fscache: BIO submitted\n");
+                nfs_add_fscache_stats(inode, NFSIOS_FSCACHE_PAGES_READ_OK, 1);
+                return ret;                  
+                                             
+        case -ENOBUFS: /* inode not in cache */
+        case -ENODATA: /* page not in cache */
+                nfs_add_fscache_stats(inode, NFSIOS_FSCACHE_PAGES_READ_FAIL, 1);
+                dfprintk(FSCACHE,                   
+                         "NFS:    readpage_from_fscache %d\n", ret);
+                return 1;
+
+        default:
+                dfprintk(FSCACHE, "NFS:    readpage_from_fscache %d\n", ret);
+                nfs_add_fscache_stats(inode, NFSIOS_FSCACHE_PAGES_READ_FAIL, 1);
+        }
+        return ret;
+}
+
+/**
+ * fscache_read_or_alloc_page - Read a page from the cache or allocate a block
+ * in which to store it
+ * @cookie: The cookie representing the cache object
+ * @page: The netfs page to fill if possible
+ * @end_io_func: The callback to invoke when and if the page is filled
+ * @context: An arbitrary piece of data to pass on to end_io_func()
+ * @gfp: The conditions under which memory allocation should be made
+ *
+ * Read a page from the cache, or if that's not possible make a potential
+ * one-block reservation in the cache into which the page may be stored once
+ * fetched from the server.
+ *
+ * If the page is not backed by the cache object, or if it there's some reason
+ * it can't be, -ENOBUFS will be returned and nothing more will be done for
+ * that page.
+ *
+ * Else, if that page is backed by the cache, a read will be initiated directly
+ * to the netfs's page and 0 will be returned by this function.  The
+ * end_io_func() callback will be invoked when the operation terminates on a
+ * completion or failure.  Note that the callback may be invoked before the
+ * return.
+ *
+ * Else, if the page is unbacked, -ENODATA is returned and a block may have
+ * been allocated in the cache.
+ *
+ * See Documentation/filesystems/caching/netfs-api.txt for a complete
+ * description.
+ */
+static inline
+int fscache_read_or_alloc_page(struct fscache_cookie *cookie,
+                               struct page *page,
+                               fscache_rw_complete_t end_io_func,
+                               void *context,
+                               gfp_t gfp)
+{
+        if (fscache_cookie_valid(cookie))
+                return __fscache_read_or_alloc_page(cookie, page, end_io_func,
+                                                    context, gfp);
+        else
+                return -ENOBUFS;
+}
+
+/*
+ * read a page from the cache or allocate a block in which to store it
+ * - we return:
+ *   -ENOMEM    - out of memory, nothing done
+ *   -ERESTARTSYS - interrupted
+ *   -ENOBUFS   - no backing object available in which to cache the block
+ *   -ENODATA   - no data available in the backing object for this block
+ *   0          - dispatched a read - it'll call end_io_func() when finished
+ */                            
+int __fscache_read_or_alloc_page(struct fscache_cookie *cookie,
+                                 struct page *page,
+                                 fscache_rw_complete_t end_io_func,
+                                 void *context,     
+                                 gfp_t gfp)
+{               
+        struct fscache_retrieval *op;
+        struct fscache_object *object;
+        int ret;
+
+        _enter("%p,%p,,,", cookie, page);
+
+        fscache_stat(&fscache_n_retrievals);
+
+        if (hlist_empty(&cookie->backing_objects))
+                goto nobufs;
+
+        ASSERTCMP(cookie->def->type, !=, FSCACHE_COOKIE_TYPE_INDEX);
+        ASSERTCMP(page, !=, NULL);
+
+        if (fscache_wait_for_deferred_lookup(cookie) < 0)
+                return -ERESTARTSYS;
+
+        op = fscache_alloc_retrieval(page->mapping, end_io_func, context);
+        if (!op) {
+                _leave(" = -ENOMEM");
+                return -ENOMEM;
+        }
+        fscache_set_op_name(&op->op, "RetrRA1");
+
+        spin_lock(&cookie->lock);
+
+        if (hlist_empty(&cookie->backing_objects))
+                goto nobufs_unlock;
+        object = hlist_entry(cookie->backing_objects.first,
+                             struct fscache_object, cookie_link);
+
+        ASSERTCMP(object->state, >, FSCACHE_OBJECT_LOOKING_UP);
+
+        atomic_inc(&object->n_reads);
+        set_bit(FSCACHE_OP_DEC_READ_CNT, &op->op.flags);
+
+        if (fscache_submit_op(object, &op->op) < 0)
+                goto nobufs_unlock;
+        spin_unlock(&cookie->lock);
+
+        fscache_stat(&fscache_n_retrieval_ops);
+
+        /* pin the netfs read context in case we need to do the actual netfs
+         * read because we've encountered a cache read failure */
+        fscache_get_context(object->cookie, op->context);
+
+        /* we wait for the operation to become active, and then process it
+         * *here*, in this thread, and not in the thread pool */
+        ret = fscache_wait_for_retrieval_activation(
+                object, op,
+                __fscache_stat(&fscache_n_retrieval_op_waits),
+                __fscache_stat(&fscache_n_retrievals_object_dead));
+        if (ret < 0)
+                goto error;
+
+        /* ask the cache to honour the operation */
+        if (test_bit(FSCACHE_COOKIE_NO_DATA_YET, &object->cookie->flags)) {
+                fscache_stat(&fscache_n_cop_allocate_page);
+                ret = object->cache->ops->allocate_page(op, page, gfp);
+                fscache_stat_d(&fscache_n_cop_allocate_page);
+                if (ret == 0)
+                        ret = -ENODATA;
+        } else {
+                fscache_stat(&fscache_n_cop_read_or_alloc_page);
+                ret = object->cache->ops->read_or_alloc_page(op, page, gfp);
+                fscache_stat_d(&fscache_n_cop_read_or_alloc_page);
+        }
+
+error:
+        if (ret == -ENOMEM)
+                fscache_stat(&fscache_n_retrievals_nomem);
+        else if (ret == -ERESTARTSYS)
+                fscache_stat(&fscache_n_retrievals_intr);
+        else if (ret == -ENODATA)
+                fscache_stat(&fscache_n_retrievals_nodata);
+        else if (ret < 0)
+                fscache_stat(&fscache_n_retrievals_nobufs);
+        else
+                fscache_stat(&fscache_n_retrievals_ok);
+
+        fscache_put_retrieval(op);
+        _leave(" = %d", ret);
+        return ret;
+
+nobufs_unlock:
+        spin_unlock(&cookie->lock);
+        kfree(op);
+nobufs:
+        fscache_stat(&fscache_n_retrievals_nobufs);
+        _leave(" = -ENOBUFS");
+        return -ENOBUFS;
+}
+
+/*
+ * data read operation
+ */
+struct fscache_retrieval {
+        struct fscache_operation op;
+        struct address_space    *mapping;       /* netfs pages */
+        fscache_rw_complete_t   end_io_func;    /* function to call on I/O completion */
+        void                    *context;       /* netfs read context (pinned) */
+        struct list_head        to_do;          /* list of things to be done by the backend */
+        unsigned long           start_time;     /* time at which retrieval started */
+};                               
+
+
+/*
+ * allocate a retrieval op
+ */
+static struct fscache_retrieval *fscache_alloc_retrieval(
+        struct address_space *mapping,
+        fscache_rw_complete_t end_io_func,
+        void *context)
+{
+        struct fscache_retrieval *op;
+
+        /* allocate a retrieval operation and attempt to submit it */
+        op = kzalloc(sizeof(*op), GFP_NOIO);
+        if (!op) {
+                fscache_stat(&fscache_n_retrievals_nomem);
+                return NULL;
+        }
+
+        fscache_operation_init(&op->op, fscache_release_retrieval_op);
+        op->op.flags    = FSCACHE_OP_MYTHREAD | (1 << FSCACHE_OP_WAITING);
+        op->mapping     = mapping;
+        op->end_io_func = end_io_func;
+        op->context     = context;
+        op->start_time  = jiffies;
+        INIT_WORK(&op->op.fast_work, fscache_retrieval_work);
+        INIT_LIST_HEAD(&op->to_do);
+        fscache_set_op_name(&op->op, "Retr");
+        return op;
+}
+
+
+---------------------------------------- 8< ---------------------------------------------------- 
+fs/read_write.c 
 
 SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
                 size_t, count)
@@ -1331,6 +1738,59 @@ generic_file_buffered_write(struct kiocb *iocb, const struct iovec *iov,
         return written ? written : status;
 }
 
-generic_perform_write
+generic_perform_write()
   -> a_ops->write_begin()
-      ->  
+      -> nfs_write_begin()  
+
+/*
+ * This does the "real" work of the write. We must allocate and lock the
+ * page to be sent back to the generic routine, which then copies the
+ * data from user space.
+ *
+ * If the writer ends up delaying the write, the writer needs to
+ * increment the page use counts until he is done with the page.
+ */
+static int nfs_write_begin(struct file *file, struct address_space *mapping,
+                        loff_t pos, unsigned len, unsigned flags,
+                        struct page **pagep, void **fsdata)
+{
+        int ret;
+        pgoff_t index = pos >> PAGE_CACHE_SHIFT;
+        struct page *page;
+        int once_thru = 0;
+
+        dfprintk(PAGECACHE, "NFS: write_begin(%s/%s(%ld), %u@%lld)\n",
+                file->f_path.dentry->d_parent->d_name.name,
+                file->f_path.dentry->d_name.name,
+                mapping->host->i_ino, len, (long long) pos);
+
+start:
+        /*
+         * Prevent starvation issues if someone is doing a consistency
+         * sync-to-disk
+         */
+        ret = wait_on_bit(&NFS_I(mapping->host)->flags, NFS_INO_FLUSHING,
+                        nfs_wait_bit_killable, TASK_KILLABLE);
+        if (ret)
+                return ret;
+
+        page = grab_cache_page_write_begin(mapping, index, flags);
+        if (!page)
+                return -ENOMEM;
+        *pagep = page;
+
+        ret = nfs_flush_incompatible(file, page);
+        if (ret) {
+                unlock_page(page);
+                page_cache_release(page);
+        } else if (!once_thru &&
+                   nfs_want_read_modify_write(file, page, pos, len)) {
+                once_thru = 1;
+                ret = nfs_readpage(file, page);
+                page_cache_release(page);
+                if (!ret)
+                        goto start;
+        }
+        return ret;
+}
+
