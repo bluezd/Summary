@@ -459,6 +459,7 @@ static int nfs_get_sb(struct file_system_type *fs_type,
 
         data = nfs_alloc_parsed_mount_data(NFS_DEFAULT_VERSION);
         // 创建一个 nfs_parsed_mount_data (In-kernel mount arguments)
+	// 默认版本 v3
 
         mntfh = nfs_alloc_fhandle();
         // 创建一个 client file handle
@@ -1263,6 +1264,15 @@ SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, int, mode)
 
 do_filp_open()
   -> 
+
+
+do_lookup()
+  -> d_alloc()
+     // 为要打开的文件创建目录项对象
+       -> dir->i_op->lookup()
+	// 创建要打开文件的 inode
+
+
 ---------------------------------------- 8< ---------------------------------------------------- 
 fs/read_write.c 
 
