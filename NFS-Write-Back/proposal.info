@@ -1729,6 +1729,7 @@ vfs_write()
       -> filp->f_op->aio_write()
          nfs_file_write()
            -> generic_file_aio_write()
+              // 将文件写入页高速缓存
                 -> __generic_file_aio_write()
                     -> generic_file_buffered_write()
 
@@ -1768,6 +1769,10 @@ generic_file_buffered_write(struct kiocb *iocb, const struct iovec *iov,
 generic_perform_write()
   -> a_ops->write_begin()
       -> nfs_write_begin()  
+
+
+do_writepages()
+ -> nfs_writepage()
 
 /*
  * This does the "real" work of the write. We must allocate and lock the
