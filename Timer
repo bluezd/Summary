@@ -1048,7 +1048,7 @@ static void timekeeper_setup_internals(struct clocksource *clock)
         timekeeper.xtime_nsec = 0;
         timekeeper.shift = clock->shift;
 
-        timekeeper.ntp_error = 0;
+         负责更新系统时间。timekeeper.ntp_error = 0;
         timekeeper.ntp_error_shift = NTP_SCALE_SHIFT - clock->shift;
 
         /*
@@ -1416,6 +1416,33 @@ static void clocksource_select(void)
         }
 }
 
+static void clocksource_enqueue_watchdog(struct clocksource *cs)
+{
+        unsigned long flags;
+        
+        spin_lock_irqsave(&watchdog_lock, flags);
+        if (cs->flags & CLOCK_SOURCE_MUST_VERIFY) {
+                /* cs is a clocksource to be watched. */
+                list_add(&cs->wd_list, &watchdog_list);
+                cs->flags &= ~CLOCK_SOURCE_WATCHDOG;
+        } else {
+                /* cs is a watchdog. */
+                if (cs->flags & CLOCK_SOURCE_IS_CONTINUOUS)
+                        cs->flags |= CLOCK_SOURCE_VALID_FOR_HRES;
+                        // 这句最重要
+
+                /* Pick the best watchdog. */
+                if (!watchdog || cs->rating > watchdog->rating) {
+                        watchdog = cs;
+                        /* Reset watchdog cycles */
+                        clocksource_reset_watchdog();
+                }
+        }
+        /* Check if the watchdog timer needs to be started. */
+        clocksource_start_watchdog();
+        spin_unlock_irqrestore(&watchdog_lock, flags);
+}
+
 
 在此之前会注册几种时钟源
 比如:
@@ -1453,6 +1480,9 @@ static int __init clocksource_done_booting(void)
         mutex_unlock(&clocksource_mutex);
         return 0;       
 }                 
+
+LOG:
+Switching to clocksource hpet ...... 此时 时钟源的 flag 已经被加上 "cs->flags |= CLOCK_SOURCE_VALID_FOR_HRES",所以此时在相应中断程序下半部中 timekeeping_valid_for_hres() 函数中返回 1 ，这样便可以执行 hrtimer_switch_to_hres() 函数切换到高精度模式，这就是在之前看不到切换的原因，只有在当前时钟源支持高精度，hpet/tsc,在系统启动前期时钟源一直是 PIT,当时钟源切换到 hpet or tsc 时，时钟事件设备才会切换到高精度。这就是为什么每次在clocksource_done_booting（） 函数之后执行切换操作。
 
 
 /**                     
@@ -1823,6 +1853,10 @@ void __init setup_default_timer_irq(void)
 |               .name = "timer"                                                           |
 |       };                                                                                |
 +-----------------------------------------------------------------------------------------+
+
+
+
+//经测试，第一次时钟中断发生在 native_calibrate_tsc() 中 在 global clock event device 已经注册之后(hpet) ,global_clock_event->event_handler(global_clock_event) 为 tick_handle_periodic() 负责更新系统时间。 
 
 
 void __init tsc_init(void)
