@@ -1857,6 +1857,7 @@ int __fscache_read_or_alloc_page(struct fscache_cookie *cookie,
                 fscache_stat(&fscache_n_cop_read_or_alloc_page);
                 ret = object->cache->ops->read_or_alloc_page(op, page, gfp);
 		// read a netfs page from the cache.
+		// submit a request to read the data from the cache's backing device directly into the page specified
 
                 fscache_stat_d(&fscache_n_cop_read_or_alloc_page);
         }
@@ -1926,6 +1927,62 @@ static struct fscache_retrieval *fscache_alloc_retrieval(
         INIT_LIST_HEAD(&op->to_do);
         fscache_set_op_name(&op->op, "Retr");
         return op;
+}
+
+// When the read is complete,end_io_func() -> nfs_readpage_from_fscache_complete() will be inovked.
+
+/*
+ * Handle completion of a page being read from the cache.
+ * - Called in process (keventd) context.
+ */
+static void nfs_readpage_from_fscache_complete(struct page *page,
+                                               void *context,
+                                               int error)
+{
+        dfprintk(FSCACHE,
+                 "NFS: readpage_from_fscache_complete (0x%p/0x%p/%d)\n",
+                 page, context, error);
+
+        /* if the read completes with an error, we just unlock the page and let
+         * the VM reissue the readpage */
+        if (!error) {
+                SetPageUptodate(page);
+                unlock_page(page);
+        } else {
+                error = nfs_readpage_async(context, page->mapping->host, page);
+		// 猜测从server 中读取文件内容 netfs -> cached pages -> cached files
+                if (error)
+                        unlock_page(page);
+        }
+}
+
+int nfs_readpage_async(struct nfs_open_context *ctx, struct inode *inode,
+                       struct page *page)
+{
+        struct nfs_page *new;
+        unsigned int len;
+        struct nfs_pageio_descriptor pgio;
+                                               
+        len = nfs_page_length(page);           
+        if (len == 0)
+                return nfs_return_empty_page(page);
+        new = nfs_create_request(ctx, inode, page, 0, len);
+        if (IS_ERR(new)) {
+                unlock_page(page);
+                return PTR_ERR(new);
+        }
+        if (len < PAGE_CACHE_SIZE)
+                zero_user_segment(page, len, PAGE_CACHE_SIZE);
+                
+        nfs_pageio_init(&pgio, inode, NULL, 0, 0);
+        nfs_list_add_request(new, &pgio.pg_list);
+        pgio.pg_count = len;
+                        
+        if (NFS_SERVER(inode)->rsize < PAGE_CACHE_SIZE)
+                nfs_pagein_multi(&pgio);
+        else
+                nfs_pagein_one(&pgio);
+        return 0;
 }
 
 
