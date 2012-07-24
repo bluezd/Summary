@@ -1,0 +1,262 @@
+kernel/posix-timers.c
+
+__initcall(init_posix_timers);
+
+#define __initcall(fn) device_initcall(fn)
+
+#define device_initcall(fn)             __define_initcall("6",fn,6)
+
+/*
+ * Initialize everything, well, just everything in Posix clocks/timers ;)
+ */
+static __init int init_posix_timers(void)
+{
+        struct k_clock clock_realtime = {
+                .clock_getres = hrtimer_get_res,
+        };   
+        struct k_clock clock_monotonic = {
+                .clock_getres = hrtimer_get_res,
+                .clock_get = posix_ktime_get_ts,
+                .clock_set = do_posix_clock_nosettime,
+        };   
+        struct k_clock clock_monotonic_raw = {
+                .clock_getres = hrtimer_get_res,
+                .clock_get = posix_get_monotonic_raw,
+                .clock_set = do_posix_clock_nosettime,
+                .timer_create = no_timer_create,
+                .nsleep = no_nsleep,
+        };   
+        struct k_clock clock_realtime_coarse = {
+                .clock_getres = posix_get_coarse_res,
+                .clock_get = posix_get_realtime_coarse,
+                .clock_set = do_posix_clock_nosettime,
+                .timer_create = no_timer_create,
+                .nsleep = no_nsleep,
+        };   
+        struct k_clock clock_monotonic_coarse = {
+                .clock_getres = posix_get_coarse_res,
+                .clock_get = posix_get_monotonic_coarse,
+                .clock_set = do_posix_clock_nosettime,
+                .timer_create = no_timer_create,
+                .nsleep = no_nsleep,
+        };   
+
+        register_posix_clock(CLOCK_REALTIME, &clock_realtime);
+        register_posix_clock(CLOCK_MONOTONIC, &clock_monotonic);
+        register_posix_clock(CLOCK_MONOTONIC_RAW, &clock_monotonic_raw);
+        register_posix_clock(CLOCK_REALTIME_COARSE, &clock_realtime_coarse);
+        register_posix_clock(CLOCK_MONOTONIC_COARSE, &clock_monotonic_coarse);
+
+        posix_timers_cache = kmem_cache_create("posix_timers_cache",
+                                        sizeof (struct k_itimer), 0, SLAB_PANIC,
+                                        NULL);
+        idr_init(&posix_timers_id);
+        return 0;
+}
+
+struct k_clock {
+        int res;                /* in nanoseconds */
+        int (*clock_getres) (const clockid_t which_clock, struct timespec *tp);
+        int (*clock_set) (const clockid_t which_clock, struct timespec * tp);
+        int (*clock_get) (const clockid_t which_clock, struct timespec * tp);
+        int (*timer_create) (struct k_itimer *timer);
+        int (*nsleep) (const clockid_t which_clock, int flags,
+                       struct timespec *, struct timespec __user *);
+        long (*nsleep_restart) (struct restart_block *restart_block);
+        int (*timer_set) (struct k_itimer * timr, int flags,
+                          struct itimerspec * new_setting,
+                          struct itimerspec * old_setting);
+        int (*timer_del) (struct k_itimer * timr);
+#define TIMER_RETRY 1
+        void (*timer_get) (struct k_itimer * timr,
+                           struct itimerspec * cur_setting);
+};      
+
+void register_posix_clock(const clockid_t clock_id, struct k_clock *new_clock)
+{
+        if ((unsigned) clock_id >= MAX_CLOCKS) {
+                printk("POSIX clock register failed for clock_id %d\n",
+                       clock_id);
+                return;
+        }
+
+        posix_clocks[clock_id] = *new_clock;
+}
+
+static struct k_clock posix_clocks[MAX_CLOCKS];
+
+/*
+ * The IDs of the various system clocks (for POSIX.1b interval timers):
+ */
+#define CLOCK_REALTIME                  0
+#define CLOCK_MONOTONIC                 1
+#define CLOCK_PROCESS_CPUTIME_ID        2
+#define CLOCK_THREAD_CPUTIME_ID         3
+#define CLOCK_MONOTONIC_RAW             4
+#define CLOCK_REALTIME_COARSE           5
+#define CLOCK_MONOTONIC_COARSE          6
+
+/*
+ * The IDs of various hardware clocks:
+ */
+#define CLOCK_SGI_CYCLE                 10
+#define MAX_CLOCKS                      16
+#define CLOCKS_MASK                     (CLOCK_REALTIME | CLOCK_MONOTONIC)
+#define CLOCKS_MONO                     CLOCK_MONOTONIC
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+clock_gettime(CLOCK_MONOTONIC, &now);
+
+SYSCALL_DEFINE2(clock_gettime, const clockid_t, which_clock,
+                struct timespec __user *,tp)
+{
+        struct timespec kernel_tp;
+        int error;
+
+        if (invalid_clockid(which_clock))
+                return -EINVAL;
+        error = CLOCK_DISPATCH(which_clock, clock_get,
+                               (which_clock, &kernel_tp));
+        // posix_ktime_get_ts(CLOCK_MONOTONIC, &kernel_tp);
+
+        if (!error && copy_to_user(tp, &kernel_tp, sizeof (kernel_tp)))
+                error = -EFAULT;
+
+        return error;
+
+}
+
+/*
+ * Return nonzero if we know a priori this clockid_t value is bogus.
+ */
+static inline int invalid_clockid(const clockid_t which_clock)
+{
+        if (which_clock < 0)    /* CPU clock, posix_cpu_* will check it */
+                return 0;
+        if ((unsigned) which_clock >= MAX_CLOCKS)
+                return 1;
+        if (posix_clocks[which_clock].clock_getres != NULL)
+                return 0;
+        if (posix_clocks[which_clock].res != 0)
+                return 0;
+        return 1;
+}
+
+/*
+ * Call the k_clock hook function if non-null, or the default function.
+ */
+#define CLOCK_DISPATCH(clock, call, arglist) \
+        ((clock) < 0 ? posix_cpu_##call arglist : \
+         (posix_clocks[clock].call != NULL \
+          ? (*posix_clocks[clock].call) arglist : common_##call arglist))
+
+CLOCK_DISPATCH(CLOCK_MONOTONIC,clock_get,(CLOCK_MONOTONIC, &kernel_tp)) \
+((clock) <  0 ? posix_cpu_##call arglist : (posix_clocks[clock].call != NULL ? (*posix_clocks[clock].call) arglist : common_##call arglist))
+         
+
+/*
+ * Get monotonic time for posix timers
+ */
+static int posix_ktime_get_ts(clockid_t which_clock, struct timespec *tp)
+{
+        ktime_get_ts(tp);
+        return 0;
+}
+
+/**
+ * ktime_get_ts - get the monotonic clock in timespec format
+ * @ts:         pointer to timespec variable
+ *
+ * The function calculates the monotonic clock from the realtime
+ * clock and the wall_to_monotonic offset and stores the result
+ * in normalized timespec format in the variable pointed to by @ts.
+ */
+void ktime_get_ts(struct timespec *ts)
+{
+        struct timespec tomono;
+        unsigned int seq;
+        s64 nsecs;
+
+        WARN_ON(timekeeping_suspended);
+
+        do {
+                seq = read_seqbegin(&xtime_lock);
+                // 加读锁
+
+                *ts = xtime;
+                // 当前时间
+
+                tomono = wall_to_monotonic;
+                nsecs = timekeeping_get_ns();
+                // 得到距离上一次得到时间中间走过的时间(纳秒)
+
+        } while (read_seqretry(&xtime_lock, seq));
+
+        set_normalized_timespec(ts, ts->tv_sec + tomono.tv_sec,
+                                ts->tv_nsee + tomono.tv_nsec + nsecs);
+}
+
+/**
+ * set_normalized_timespec - set timespec sec and nsec parts and normalize
+ *
+ * @ts:         pointer to timespec variable to be set
+ * @sec:        seconds to set
+ * @nsec:       nanoseconds to set
+ *      
+ * Set seconds and nanoseconds field of a timespec variable and
+ * normalize to the timespec storage format
+ *
+ * Note: The tv_nsec part is always in the range of
+ *      0 <= tv_nsec < NSEC_PER_SEC
+ * For negative values only the tv_sec field is negative !
+ */             
+void set_normalized_timespec(struct timespec *ts, time_t sec, s64 nsec)
+{
+        while (nsec >= NSEC_PER_SEC) {
+                /*
+                 * The following asm() prevents the compiler from
+                 * optimising this loop into a modulo operation. See
+                 * also __iter_div_u64_rem() in include/linux/time.h
+                 */
+                asm("" : "+rm"(nsec));
+                nsec -= NSEC_PER_SEC;
+                ++sec;
+        }
+        while (nsec < 0) {
+                asm("" : "+rm"(nsec));
+                nsec += NSEC_PER_SEC;
+                --sec;
+        }
+        ts->tv_sec = sec;
+        ts->tv_nsec = nsec;
+}       
+
+/*
+ * The current time
+ * wall_to_monotonic is what we need to add to xtime (or xtime corrected
+ * for sub jiffie times) to get to monotonic time.  Monotonic is pegged
+ * at zero at system boot time, so wall_to_monotonic will be negative,
+ * however, we will ALWAYS keep the tv_nsec part positive so we can use
+ * the usual normalization.
+ *
+ * wall_to_monotonic is moved after resume from suspend for the monotonic
+ * time not to jump. We need to add total_sleep_time to wall_to_monotonic
+ * to get the real boot based time offset.
+ *
+ * - wall_to_monotonic is no longer the boot time, getboottime must be
+ * used instead.
+ */
+struct timespec xtime __attribute__ ((aligned (16)));
+struct timespec wall_to_monotonic __attribute__ ((aligned (16)));
+static struct timespec total_sleep_time;
+
+/*
+ * The raw monotonic time for the CLOCK_MONOTONIC_RAW posix clock.
+ */
+struct timespec raw_time;
+                                                                                                   
+/* flag for if timekeeping is suspended */                                                         
+int __read_mostly timekeeping_suspended;                               
+
