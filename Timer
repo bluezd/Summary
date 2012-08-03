@@ -3195,6 +3195,9 @@ kernel_init()
 	                                          --> setup_secondary_APIC_clock()
 	                                                --> setup_APIC_timer()
 
+在 do_boot_cpu() 函数中在每个cpu上建立0号进程，
+
+在 wakeup_secondary_cpu_via_ini 函数中向要启动的 cpu 发送 IPI 中断，AP cpu ,然后 跳转到trampoline.S 的入口装入 gdt 和 idt ,然后 initialize_secondary() 最后根据 current-> thread.esp 最终跳转至 start_secondary. 
 
 static inline void startup_ipi_hook(int phys_apicid, unsigned long start_eip,
                                     unsigned long start_esp)
