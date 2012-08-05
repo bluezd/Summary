@@ -209,7 +209,49 @@ cpu_base = &__raw_get_cpu_var(hrtimer_bases);
 
 #define __my_cpu_offset per_cpu_offset(raw_smp_processor_id())
 
-#define raw_smp_processor_id() (percpu_read(cpu_number))
+
+extern unsigned long __per_cpu_offset[NR_CPUS];
+
+#define per_cpu_offset(x) (__per_cpu_offset[x])
+
+unsigned long __per_cpu_offset[NR_CPUS] __read_mostly = {
+	        [0 ... NR_CPUS-1] = BOOT_PERCPU_OFFSET,
+};
+EXPORT_SYMBOL(__per_cpu_offset);
+
+初始化在 setup_per_cpu_areas() 
+
+#define BOOT_PERCPU_OFFSET ((unsigned long)__per_cpu_load)
+
+
+ +-------------------------------------------------------------------------------------+
+ |      arch/x86/kernel/vmlinux.lds.S                                                  |
+ |      /*                                                                             |
+ |       *  * Per-cpu symbols which need to be offset from __per_cpu_load              |
+ |       *   * for the boot processor.                                                 |
+ |       *    */                                                                       |
+ |      #define INIT_PER_CPU(x) init_per_cpu__##x = per_cpu__##x + __per_cpu_load      |
+ |      INIT_PER_CPU(gdt_page);                                                        |
+ |      INIT_PER_CPU(irq_stack_union);                                                 |
+ |                                                                                     |
+ +-------------------------------------------------------------------------------------+
+ 
+#define __raw_get_cpu_var(var) \
+	 (*SHIFT_PERCPU_PTR(&per_cpu_hrtimer_bases, __per_cpu_offset[CURRENT_CPU_NUMBER]))
+
+=> RELOC_HIDE((&per_cpu_hrtimer_bases),(__per_cpu_offset[CURRENT_CPU_NUMBER]))
+
+# define RELOC_HIDE(ptr, off)                                   \
+  ({ unsigned long __ptr;                                       \
+     __ptr = (unsigned long) (ptr);                             \
+    (typeof(ptr)) (__ptr + (off)); })
+
+*((struct hrtimer_cpu_base) (&per_cpu_hrtimer_bases + __per_cpu_offset[CURRENT_CPU_NUMBER]))
+
+// 这样就获得了 cpu X 的 per cpu 变量 per_cpu_hrtimer_bases 。
+
+__per_cpu_offset 保存的是 per cpu 变量的本地拷贝和 .data.percpu 段的地址的差值。
+
 
 #define percpu_read(var)        percpu_from_op("mov", per_cpu__##var,   \
                                                "m" (per_cpu__##var))
