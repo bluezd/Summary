@@ -201,9 +201,8 @@ __attribute__((section(.data.percpu))) __typeof__(hrtimer_cpu_base) per_cpu__hrt
 cpu_base = &__raw_get_cpu_var(hrtimer_bases);
 
 #define __raw_get_cpu_var(var) \
-	        (*SHIFT_PERCPU_PTR(&per_cpu_var(var), __my_cpu_offset))
-
-#define per_cpu_var(var) per_cpu__##var   // per_cpu_hrtimer_bases
+	        (*SHIFT_PERCPU_PTR(&per_cpu_var(var), __my_cpu_offset)) 
+#define per_cpu_var(var) per_cpu__##var   // per_cpu_hrtimer_bases 
 
 #define SHIFT_PERCPU_PTR(__p, __offset) RELOC_HIDE((__p), (__offset))
 
@@ -311,4 +310,17 @@ asm("movb "__percpu_arg(1)",%0"
 asm("movb %%gs:%P1, %0"
         :"=q"(ret__)
         :"m"(per_cpu__cpu_number));
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+per_cpu(cpu_number, cpu) = cpu; // 假设 cpu 为 1
+
+
+#define per_cpu(var, cpu) \        
+        (*SHIFT_PERCPU_PTR(&per_cpu_var(var), per_cpu_offset(cpu)))
+
+(*SHIFT_PERCPU_PTR(&per_cpu__cpu_number, __per_cpu_offset[1]))
+
+// 将 cpu 1 的 per cpu 变量 per_cpu__cpu_number 的值设为 1
 
