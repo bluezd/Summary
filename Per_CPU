@@ -252,6 +252,20 @@ EXPORT_SYMBOL(__per_cpu_offset);
 __per_cpu_offset 保存的是 per cpu 变量的本地拷贝和 .data.percpu 段的地址的差值。
 
 
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+struct hrtimer_cpu_base *base = &per_cpu(hrtimer_bases, cpu);
+
+#define per_cpu(var, cpu) \        
+        (*SHIFT_PERCPU_PTR(&per_cpu_var(var), per_cpu_offset(cpu)))
+
+(*SHIFT_PERCPU_PTR(&per_cpu__hrtimer_bases, __per_cpu_offset[1]))
+
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 #define percpu_read(var)        percpu_from_op("mov", per_cpu__##var,   \
                                                "m" (per_cpu__##var))
 
