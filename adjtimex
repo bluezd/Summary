@@ -10,3 +10,6 @@ sys_adjtimex()
 	                                  -> tick_program_event()
 	                                       -> tick_dev_program_event();
 					            -> ktime_get << stuck here
+
+
+upstream commit 6b43ae8a619d17c4935c3320d2ef9e92bdeed05d
