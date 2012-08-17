@@ -12,4 +12,36 @@ sys_adjtimex()
 					            -> ktime_get << stuck here
 
 
-upstream commit 6b43ae8a619d17c4935c3320d2ef9e92bdeed05d
+
+一共有大约3种可能引起 leap second 后 live lock
+
+1. upstream commit 6b43ae8a619d17c4935c3320d2ef9e92bdeed05d
+2. First: in do_adjtimex() takes write_seqlock_irq(&xtime_lock) then tries to get a timer base lock in __hrtimer_start_range_ns() // the timer base lock was hold by second
+   Second: diagnosed this as the following pattern:
+
+           cpu_idle()
+	     -> tick_nohz_stop_sched_tick()
+	          -> hrtimer_start()
+		      hrtimer_start_range_ns()  // takes this same timer base lock 
+		      -> __remove_hrtimer()
+		          -> hrtimer_force_reprogram()
+			       -> tick_program_event()
+			            -> tick_dev_program_event()
+				         -> ktime_get // write lock was hold by First() 
+
+
+3. https://bugzilla.redhat.com/show_bug.cgi?id=836748#c122
+
+  sys_adjtimex()
+  -> do_adjtimex()  // get the write xtime_lock lock
+        -> process_adjtimex_modes()
+             -> process_adj_status()
+                 -> ntp_start_leap_timer()
+                      -> hrtimer_start()
+                           -> __hrtimer_start_range_ns()
+                                -> hrtimer_enqueue_reprogram()
+                                     -> hrtimer_reprogram()
+                                          -> tick_program_event()
+                                               -> tick_dev_program_event();
+                                                    -> ktime_get << stuck here
+ 
