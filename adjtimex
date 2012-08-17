@@ -1,0 +1,12 @@
+sys_adjtimex()
+  -> do_adjtimex()
+	-> process_adjtimex_modes()
+	     -> process_adj_status()
+	         -> ntp_start_leap_timer()
+	              -> hrtimer_start()
+	                   -> __hrtimer_start_range_ns()
+	                        -> hrtimer_enqueue_reprogram()
+	                             -> hrtimer_reprogram()
+	                                  -> tick_program_event()
+	                                       -> tick_dev_program_event();
+					            -> ktime_get << stuck here
