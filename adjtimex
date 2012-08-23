@@ -16,7 +16,22 @@ sys_adjtimex()
 一共有大约3种可能引起 leap second 后 live lock
 
 1. upstream commit 6b43ae8a619d17c4935c3320d2ef9e92bdeed05d
-2. First: in do_adjtimex() takes write_seqlock_irq(&xtime_lock) then tries to get a timer base lock in __hrtimer_start_range_ns() // the timer base lock was hold by second
+
+    CPU 0                                                    CPU 1
+    do_adjtimex()
+      spin_lock_irq(&ntp_lock);
+        process_adjtimex_modes();                                timer_interrupt()
+          process_adj_status();                                do_timer()
+            ntp_start_leap_timer();                             write_lock(&xtime_lock);
+              hrtimer_start();                                  update_wall_time();
+                 hrtimer_reprogram();                            ntp_tick_length()
+                   tick_program_event()                            spin_lock(&ntp_lock);
+                     clockevents_program_event()
+                   ktime_get()
+                         seq = req_seqbegin(xtime_lock);
+
+
+2. BZ 836748 First: in do_adjtimex() takes write_seqlock_irq(&xtime_lock) then tries to get a timer base lock in __hrtimer_start_range_ns() // the timer base lock was hold by second
    Second: diagnosed this as the following pattern:
 
            cpu_idle()

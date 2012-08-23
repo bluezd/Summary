@@ -154,7 +154,7 @@ static inline int invalid_clockid(const clockid_t which_clock)
           ? (*posix_clocks[clock].call) arglist : common_##call arglist))
 
 CLOCK_DISPATCH(CLOCK_MONOTONIC,clock_get,(CLOCK_MONOTONIC, &kernel_tp)) \
-((clock) <  0 ? posix_cpu_##call arglist : (posix_clocks[clock].call != NULL ? (*posix_clocks[clock].call) arglist : common_##call arglist))
+((clock) <  0 ? posix_cpu_##call arglist : (posix_clocks[clock].clock_get != NULL ? (*posix_clocks[clock].call) arglist : common_##call arglist))
          
 
 /*
@@ -260,6 +260,18 @@ struct timespec raw_time;
 /* flag for if timekeeping is suspended */                                                         
 int __read_mostly timekeeping_suspended;                               
 
+
+
+int do_settimeofday(struct timespec *tv)
+{
+	......
+
+	ts_delta.tv_sec = tv->tv_sec - xtime.tv_sec;
+	ts_delta.tv_nsec = tv->tv_nsec - xtime.tv_nsec;
+	wall_to_monotonic = timespec_sub(wall_to_monotonic, ts_delta);
+
+	......
+}
 
  --------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
